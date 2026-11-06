@@ -5,7 +5,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-// Free Pexels API key for Reels (set it on Render as PEXELS_API_KEY, never here)
+// Free video keys for Reels (set them on Render, never here).
+// Pixabay is used first; Pexels is used too if you ever get a key.
+const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY || '';
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY || '';
 
 const app = express();
@@ -283,6 +285,73 @@ async function fetchPexelsTopic([query, category]) {
     .filter(Boolean);
 }
 
+// ---------- Pixabay reels ----------
+// Pick the file closest to 720p tall-ish, small enough for phones
+function pickPixabayFile(videos) {
+  const files = ['medium', 'small', 'large', 'tiny']
+    .map(k => videos && videos[k])
+    .filter(v => v && v.url && v.width && v.height);
+  if (!files.length) return null;
+  files.sort((a, b) => Math.abs(Math.max(a.width, a.height) - 1280) - Math.abs(Math.max(b.width, b.height) - 1280));
+  return files[0];
+}
+
+async function fetchPixabayTopic([query, category]) {
+  const page = 1 + Math.floor(Math.random() * 5); // different videos each round
+  const url =
+    'https://pixabay.com/api/videos/' +
+    `?key=${PIXABAY_API_KEY}&q=${encodeURIComponent(query)}` +
+    `&safesearch=true&per_page=50&page=${page}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Pixabay status ${res.status}`);
+  const data = await res.json();
+
+  return (data.hits || [])
+    .filter(v => v.duration > 0 && v.duration <= 60) // short clips only
+    .map(v => {
+      const file = pickPixabayFile(v.videos);
+      if (!file) return null;
+      const name = v.user || 'Pixabay';
+      const tags = String(v.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+      const title = tags.length ? tags.slice(0, 3).join(' · ') : `${category} video`;
+      return {
+        id: md5('pixabay:' + v.id),
+        title: title[0].toUpperCase() + title.slice(1),
+        description: `Video by ${name} on Pixabay`,
+        author: name,
+        link: v.pageURL,
+        publishedAt: new Date().toISOString(),
+        source: 'Pixabay',
+        language: 'any',   // no speech, so it fits every language
+        country: 'World',
+        category,
+        imageUrl: file.thumbnail,
+        videoUrl: file.url,
+        videoType: 'file',
+        isShort: true,
+        vertical: file.height > file.width,
+        width: file.width,
+        height: file.height,
+        duration: v.duration,
+      };
+    })
+    .filter(Boolean);
+}
+
+// Use every video source that has a key
+async function fetchReelsTopic(topic) {
+  const jobs = [];
+  if (PIXABAY_API_KEY) jobs.push(fetchPixabayTopic(topic));
+  if (PEXELS_API_KEY) jobs.push(fetchPexelsTopic(topic));
+  const results = await Promise.allSettled(jobs);
+  const ok = results.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+  if (!ok.length && results.length) {
+    const err = results.find(r => r.status === 'rejected');
+    if (err) throw err.reason;
+  }
+  return ok;
+}
+
 function shuffle(list) {
   const a = [...list];
   for (let i = a.length - 1; i > 0; i--) {
@@ -359,7 +428,7 @@ function refresh() {
 
 // ---------- Reels pool (keeps growing with fresh videos) ----------
 const REELS_EVERY = 10 * 60 * 1000;  // add fresh reels every 10 minutes
-const TOPICS_EACH_TIME = 3;          // 3 topics per round keeps Pexels free limits safe
+const TOPICS_EACH_TIME = 4;          // 4 topics per round stays well inside free limits
 const POOL_MAX = 1500;               // keep the newest 1500 reels
 
 let reels = { at: 0, items: [], failed: [] };
@@ -370,8 +439,8 @@ let topicTurn = 0;
 function refreshReels() {
   if (reelsRefreshing) return reelsRefreshing;
   reelsRefreshing = (async () => {
-    if (!PEXELS_API_KEY) {
-      console.log('No PEXELS_API_KEY set on Render, so Reels are empty');
+    if (!PIXABAY_API_KEY && !PEXELS_API_KEY) {
+      console.log('No PIXABAY_API_KEY set on Render, so Reels are empty');
       return;
     }
     // First time: all topics. After that: a few topics each round, taking turns.
@@ -385,7 +454,7 @@ function refreshReels() {
       }
     }
 
-    const results = await runLimited(topics, 4, fetchPexelsTopic);
+    const results = await runLimited(topics, 4, fetchReelsTopic);
     const fresh = [];
     const failed = [];
     results.forEach((r, i) => {
@@ -443,8 +512,12 @@ app.get('/api/news', async (req, res) => {
       if (!reels.items.length) await refreshReels();
       // Newest 60 first (mixed), then the rest of the pool in random order,
       // so every visit shows a different set
+      // Tall (phone-shaped) videos come first, wide ones after
       const list = applyFilters(reels.items, req.query);
-      const mixed = [...shuffle(list.slice(0, 60)), ...shuffle(list.slice(60))];
+      const tall = list.filter(a => a.vertical !== false);
+      const wide = list.filter(a => a.vertical === false);
+      const mix = l => [...shuffle(l.slice(0, 60)), ...shuffle(l.slice(60))];
+      const mixed = [...mix(tall), ...mix(wide)];
       return res.json({
         articles: mixed.slice(0, max),
         updatedAt: new Date(reels.at).toISOString(),
