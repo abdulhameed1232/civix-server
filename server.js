@@ -12,8 +12,17 @@ const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY || '';
 const YT_API_KEY = process.env.YT_API_KEY || '';
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY || '';
 
+// Voice calls (LiveKit). Set these 3 on Render. The secret must never be in the app.
+const LIVEKIT_URL = process.env.LIVEKIT_URL || '';
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || '';
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || '';
+// Supabase project (public values, same as in the app) to check who is calling
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://qwrgbgobzvzitzmlrpip.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'sb_publishable_dgi4izBtp0AqX_D7-zYa3Q_lhXtFgfs';
+
 const app = express();
 app.use(cors());
+app.use(express.json({ limit: '10kb' }));
 
 const parser = new Parser({
   timeout: 15000,
@@ -133,6 +142,32 @@ const YT_CHANNELS = [
   ['National Geographic', 'UCpVm7bg6pXKo1Pr6k5kxG9A', 'en', 'World', 'Nature'],
 ];
 const YT_EVERY = 60 * 60 * 1000; // check channels for new Shorts every hour
+
+// ---------- Reels: popular creators (not news). Each costs only 2 units, checked every 3 hours ----------
+const CREATOR_CHANNELS = [
+  ['MrBeast', 'UCX6OQ3DkcsbYNE6H8uQQuVA', 'en', 'World', 'Entertainment'],
+  ['Dude Perfect', 'UCRijo3ddMTht_IHyNSNXpNQ', 'en', 'United States', 'Sports'],
+  ['Zach King', 'UCq8DICunczvLuJJq414110A', 'en', 'World', 'Entertainment'],
+  ['Mark Rober', 'UCY1kMZp36IQSyNx_9h4mpCg', 'en', 'United States', 'Science'],
+  ['Marques Brownlee', 'UCBJycsmduvYEL83R_U4JriQ', 'en', 'United States', 'Technology'],
+  ['Veritasium', 'UCHnyfMqiRRG1u-2MsSQLbXA', 'en', 'World', 'Science'],
+  ['Kurzgesagt', 'UCsXVk37bltHxD1rDPwtNM8Q', 'en', 'World', 'Education'],
+  ['Gordon Ramsay', 'UCIEv3lZ_tNXHzL3ox-_uUGQ', 'en', 'World', 'Food'],
+  ['Tasty', 'UCJFp8uSYCjXOMnkUyb3CQ3Q', 'en', 'World', 'Food'],
+  ['5-Minute Crafts', 'UC295-Dw_tDNtZXFeAPAW6Aw', 'en', 'World', 'Art'],
+  ['Nas Daily', 'UCJsUvAqDzczYv2UpFmu4PcA', 'en', 'World', 'Travel'],
+  ['BBC Earth', 'UCwmZiChSryoWQCZMIQezgTg', 'en', 'World', 'Nature'],
+  ['PewDiePie', 'UC-lHJZR3Gqxm24_Vd_AJ5Yw', 'en', 'World', 'Gaming'],
+  ['IGN', 'UCKy1dAqELo0zrOtPkf0eTMw', 'en', 'United States', 'Gaming'],
+  ['NBA', 'UCWJ2lWNubArHWmf3FIHbfcQ', 'en', 'United States', 'Sports'],
+  ['FIFA', 'UCpcTrCXblq78GZrTUTLWeBw', 'en', 'World', 'Sports'],
+  ['ICC', 'UCt2JXOLNxqry7B_4rRZME3Q', 'en', 'World', 'Sports'],
+  ['T-Series', 'UCq-Fj5jknLsUf-MWSy4_brA', 'hi', 'India', 'Music'],
+  ['CarryMinati', 'UCj22tfcQrWG7EMEKS0qLeEg', 'hi', 'India', 'Entertainment'],
+  ['BB Ki Vines', 'UCqwUrj10mAEsqezcItqvwEw', 'hi', 'India', 'Entertainment'],
+  ['Technical Guruji', 'UCOhHO2ICt0ti9KAh-QHvttQ', 'hi', 'India', 'Technology'],
+];
+const CREATORS_EVERY = 3 * 60 * 60 * 1000;
 
 // ---------- Reels: popular Shorts from ALL creators, found by topic search ----------
 // search words, app topic, language, country code
@@ -348,6 +383,7 @@ async function fetchPexelsTopic([query, category]) {
         publishedAt: new Date().toISOString(),
         source: 'Pexels',
         language: 'any',   // no speech, so it fits every language
+        kind: 'stock',
         country: 'World',
         category,
         imageUrl: v.image,
@@ -400,6 +436,7 @@ async function fetchPixabayTopic([query, category]) {
         publishedAt: new Date().toISOString(),
         source: 'Pixabay',
         language: 'any',   // no speech, so it fits every language
+        kind: 'stock',
         country: 'World',
         category,
         imageUrl: file.thumbnail,
@@ -478,6 +515,8 @@ async function toYoutubeReels(items, info) {
       isShort: true,
       vertical: true,
       duration: ok.get(x.id),
+      channelId: x.channelId,
+      kind: info.kind || 'creator', // 'news' or 'creator'
     }));
 }
 
@@ -487,8 +526,8 @@ async function fetchChannelShorts([name, channelId, language, country, category]
   const items = (list.items || [])
     .map(it => it.snippet || {})
     .filter(sn => sn.resourceId && sn.resourceId.videoId && sn.title !== 'Private video' && sn.title !== 'Deleted video')
-    .map(sn => ({ id: sn.resourceId.videoId, title: sn.title, publishedAt: sn.publishedAt, channel: name }));
-  return toYoutubeReels(items, { language, country, category });
+    .map(sn => ({ id: sn.resourceId.videoId, title: sn.title, publishedAt: sn.publishedAt, channel: name, channelId }));
+  return toYoutubeReels(items, { language, country, category, kind: category === 'World' ? 'news' : 'creator' });
 }
 
 // Popular Shorts from any creator for one topic, from the last 2 weeks
@@ -507,6 +546,7 @@ async function fetchSearchShorts([query, category, language, region]) {
       title: it.snippet.title,
       publishedAt: it.snippet.publishedAt,
       channel: stripHtml(it.snippet.channelTitle),
+      channelId: it.snippet.channelId,
     }));
   return toYoutubeReels(items, { language, country: 'World', category });
 }
@@ -544,6 +584,36 @@ function refreshYoutube() {
   return ytRefreshing;
 }
 
+let ytCreators = { at: 0, items: [], failed: [] };
+let ytCreatorsRefreshing = null;
+let ytCreatorsTimer = null;
+
+function refreshCreators() {
+  if (ytCreatorsRefreshing) return ytCreatorsRefreshing;
+  ytCreatorsRefreshing = (async () => {
+    if (!YT_API_KEY) return;
+    const results = await runLimited(CREATOR_CHANNELS, 4, fetchChannelShorts);
+    const all = [];
+    const failed = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') all.push(...r.value);
+      else {
+        failed.push(CREATOR_CHANNELS[i][0]);
+        console.log(`  x creator "${CREATOR_CHANNELS[i][0]}": ${r.reason.message}`);
+      }
+    });
+    if (all.length) ytCreators = { at: Date.now(), items: all, failed };
+    console.log(`Creator channels: ${all.length} Shorts loaded. Failed: ${failed.join(', ') || 'none'}`);
+  })()
+    .catch(e => console.error('Creator channels error:', e))
+    .finally(() => {
+      ytCreatorsRefreshing = null;
+      clearTimeout(ytCreatorsTimer);
+      ytCreatorsTimer = setTimeout(refreshCreators, ytCreators.items.length ? CREATORS_EVERY : RETRY * 5);
+    });
+  return ytCreatorsRefreshing;
+}
+
 let ytSearch = { at: 0, items: [], failed: [] };
 let langShorts = {}; // language code -> { at, items, pending }
 
@@ -558,7 +628,7 @@ try {
 
 function saveYtCache() {
   try {
-    fs.writeFileSync(YT_CACHE_FILE, JSON.stringify({ ytSearch, langShorts }));
+    fs.writeFileSync(YT_CACHE_FILE, JSON.stringify({ ytSearch, langShorts, channelAvatars }));
   } catch (e) {
     console.log('Could not save YouTube cache:', e.message);
   }
@@ -791,8 +861,8 @@ app.get('/api/news', async (req, res) => {
 
     // Reels: stock videos + YouTube Shorts mixed together
     if (shorts) {
-      if (!reels.items.length && !ytReels.items.length && !ytSearch.items.length) {
-        await Promise.all([refreshReels(), refreshYoutube(), refreshYoutubeSearch()]);
+      if (!reels.items.length && !ytReels.items.length && !ytSearch.items.length && !ytCreators.items.length) {
+        await Promise.all([refreshReels(), refreshYoutube(), refreshYoutubeSearch(), refreshCreators()]);
       }
       const stock = shuffle(applyFilters(reels.items, req.query).filter(a => a.vertical !== false));
       const news = shuffle(applyFilters(ytReels.items, req.query));
@@ -800,8 +870,8 @@ app.get('/api/news', async (req, res) => {
       const wanted = req.query.language ? parts(req.query.language) : Object.keys(langShorts);
       wanted.forEach(ensureLanguage);
       const langItems = wanted.flatMap(code => (langShorts[code] ? langShorts[code].items : []));
-      const creators = shuffle(applyFilters([...ytSearch.items, ...langItems], req.query));
-      // Mix: creator Short, news Short, creator Short, stock video, ...
+      const creators = shuffle(applyFilters([...ytCreators.items, ...ytSearch.items, ...langItems], req.query));
+      // Mix like Instagram: mostly creators, news is about 1 in 5, plus some stock clips
       const mixed = [];
       const seenIds = new Set();
       const take = l => {
@@ -812,14 +882,15 @@ app.get('/api/news', async (req, res) => {
       };
       while (stock.length || news.length || creators.length) {
         take(creators);
+        take(creators);
         take(news);
         take(creators);
         take(stock);
       }
       return res.json({
         articles: mixed.slice(0, max),
-        updatedAt: new Date(Math.max(reels.at, ytReels.at, ytSearch.at)).toISOString(),
-        feedsFailed: [...reels.failed, ...ytReels.failed, ...ytSearch.failed],
+        updatedAt: new Date(Math.max(reels.at, ytReels.at, ytSearch.at, ytCreators.at)).toISOString(),
+        feedsFailed: [...reels.failed, ...ytReels.failed, ...ytSearch.failed, ...ytCreators.failed],
         languagesLoading: wanted.filter(code => langShorts[code] && langShorts[code].pending),
       });
     }
@@ -843,10 +914,329 @@ app.get('/api/news', async (req, res) => {
   }
 });
 
+// ============================================================
+// People search: news channels, YouTube creators (like Dhruv Rathee) and their videos
+// ============================================================
+const key = s => String(s || '').trim().toLowerCase();
+const NEWS_NAMES = new Set([
+  ...FEEDS.map(f => key(f.name)),
+  ...YT_CHANNELS.filter(c => c[4] === 'World').map(c => key(c[0])),
+]);
+const FEED_SITE = {}; // news source name -> website, for its logo
+for (const f of FEEDS) {
+  try { FEED_SITE[key(f.name)] = new URL(f.url).hostname.replace(/^(feeds?|rss|www3?)\./, ''); } catch (e) { }
+}
+let channelAvatars = {}; // YouTube channel id -> picture
+try { channelAvatars = JSON.parse(fs.readFileSync(YT_CACHE_FILE, 'utf8')).channelAvatars || {}; } catch (e) { }
+
+function allYoutubeItems() {
+  return [...ytReels.items, ...ytCreators.items, ...ytSearch.items, ...Object.values(langShorts).flatMap(x => x.items || [])];
+}
+
+let peopleCache = { at: 0, list: [] };
+function buildPeople() {
+  if (Date.now() - peopleCache.at < 60 * 1000) return peopleCache.list;
+  const map = new Map();
+  const add = a => {
+    if (!a.source || a.source === 'Pixabay' || a.source === 'Pexels') return;
+    const k = key(a.source);
+    let c = map.get(k);
+    if (!c) {
+      c = {
+        id: k,
+        name: a.source,
+        kind: NEWS_NAMES.has(k) ? 'news' : 'creator',
+        category: a.category,
+        language: a.language,
+        country: a.country,
+        channelId: a.channelId,
+        reels: 0,
+        stories: 0,
+        latest: a.publishedAt,
+      };
+      map.set(k, c);
+    }
+    if (a.videoType === 'youtube') c.reels++;
+    else c.stories++;
+    if (!c.channelId && a.channelId) c.channelId = a.channelId;
+    if (a.publishedAt > c.latest) c.latest = a.publishedAt;
+  };
+  cache.articles.forEach(add);
+  allYoutubeItems().forEach(add);
+  const list = [...map.values()];
+  for (const c of list) c.imageUrl = avatarFor(c);
+  peopleCache = { at: Date.now(), list };
+  return list;
+}
+
+function avatarFor(c) {
+  if (c.channelId && channelAvatars[c.channelId]) return channelAvatars[c.channelId];
+  const site = FEED_SITE[c.id];
+  if (site) return `https://www.google.com/s2/favicons?domain=${site}&sz=128`;
+  return undefined;
+}
+
+// Get channel pictures from YouTube (1 unit for up to 50 channels)
+async function fillAvatars(people) {
+  if (!YT_API_KEY) return;
+  const missing = [...new Set(people.filter(p => p.channelId && !channelAvatars[p.channelId]).map(p => p.channelId))].slice(0, 50);
+  if (!missing.length) return;
+  try {
+    const data = await ytGet(`channels?part=snippet&id=${missing.join(',')}`);
+    for (const ch of data.items || []) {
+      const t = ch.snippet && ch.snippet.thumbnails;
+      const url = t && ((t.medium && t.medium.url) || (t.default && t.default.url));
+      if (url) channelAvatars[ch.id] = url;
+    }
+    for (const p of people) p.imageUrl = avatarFor(p);
+    saveYtCache();
+  } catch (e) {
+    console.log('Channel pictures error:', e.message);
+  }
+}
+
+// Find any YouTube creator by name (costs 100 units, so results are kept for a day and capped)
+const channelSearchCache = new Map();
+let channelSearchDay = { day: '', count: 0 };
+async function searchYoutubeChannels(q) {
+  if (!YT_API_KEY) return [];
+  const hit = channelSearchCache.get(q);
+  if (hit && Date.now() - hit.at < 24 * 3600 * 1000) return hit.list;
+  const today = new Date().toISOString().slice(0, 10);
+  if (channelSearchDay.day !== today) channelSearchDay = { day: today, count: 0 };
+  if (channelSearchDay.count >= 25) return []; // keep YouTube's free daily limit safe
+  channelSearchDay.count++;
+  const data = await ytGet(`search?part=snippet&type=channel&maxResults=8&safeSearch=strict&q=${encodeURIComponent(q)}`);
+  const list = (data.items || [])
+    .filter(it => it.snippet)
+    .map(it => {
+      const channelId = (it.id && it.id.channelId) || it.snippet.channelId;
+      const t = it.snippet.thumbnails || {};
+      const pic = (t.medium && t.medium.url) || (t.default && t.default.url);
+      if (channelId && pic) channelAvatars[channelId] = pic;
+      return {
+        id: key(it.snippet.channelTitle),
+        name: stripHtml(it.snippet.channelTitle),
+        kind: 'creator',
+        category: 'Entertainment',
+        language: 'any',
+        country: 'World',
+        channelId,
+        description: stripHtml(it.snippet.description).slice(0, 140),
+        imageUrl: pic,
+        reels: 0,
+        stories: 0,
+      };
+    })
+    .filter(p => p.channelId);
+  channelSearchCache.set(q, { at: Date.now(), list });
+  return list;
+}
+
+// Shorts from one channel, fetched on demand (2 units) and kept for 3 hours
+const channelShortsCache = new Map();
+async function channelShorts(channelId, name, info) {
+  const hit = channelShortsCache.get(channelId);
+  if (hit && Date.now() - hit.at < 3 * 3600 * 1000) return hit.items;
+  let items = [];
+  for (const prefix of ['UUSH', 'UU']) { // Shorts list first, then all uploads
+    try {
+      const list = await ytGet(`playlistItems?part=snippet&maxResults=30&playlistId=${prefix}${channelId.slice(2)}`);
+      const raw = (list.items || [])
+        .map(it => it.snippet || {})
+        .filter(sn => sn.resourceId && sn.resourceId.videoId && sn.title !== 'Private video' && sn.title !== 'Deleted video')
+        .map(sn => ({ id: sn.resourceId.videoId, title: sn.title, publishedAt: sn.publishedAt, channel: name, channelId }));
+      items = await toYoutubeReels(raw, info);
+      if (items.length) break;
+    } catch (e) { }
+  }
+  channelShortsCache.set(channelId, { at: Date.now(), items });
+  return items;
+}
+
+const publicPerson = p => ({
+  id: p.id,
+  name: p.name,
+  kind: p.kind,
+  category: p.category,
+  language: p.language,
+  country: p.country,
+  channelId: p.channelId,
+  imageUrl: p.imageUrl,
+  description: p.description,
+  reels: p.reels,
+  stories: p.stories,
+});
+
+// /api/people?q=dhruv   -> channels and creators matching the words
+app.get('/api/people', async (req, res) => {
+  try {
+    if (!cache.articles.length) await refresh();
+    const q = key(req.query.q).slice(0, 60);
+    let list = buildPeople();
+    if (q) {
+      list = list.filter(p => key(p.name).includes(q) || key(p.category).includes(q));
+      list.sort((a, b) => {
+        const sa = key(a.name).startsWith(q) ? 0 : 1;
+        const sb = key(b.name).startsWith(q) ? 0 : 1;
+        return sa - sb || (b.reels + b.stories) - (a.reels + a.stories);
+      });
+    } else {
+      list = [...list].sort((a, b) => (b.reels * 3 + b.stories) - (a.reels * 3 + a.stories));
+    }
+    list = list.slice(0, 25);
+    if (q.length >= 3 && list.length < 4) {
+      try {
+        const more = await searchYoutubeChannels(q);
+        const have = new Set(list.map(p => p.channelId || p.id));
+        list = [...list, ...more.filter(p => !have.has(p.channelId) && !have.has(p.id))];
+      } catch (e) {
+        console.log('Channel search error:', e.message);
+      }
+    }
+    await fillAvatars(list);
+    res.json({ people: list.map(publicPerson) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not search people' });
+  }
+});
+
+// /api/creator?name=Dhruv%20Rathee&channelId=UC...   -> their reels and stories
+app.get('/api/creator', async (req, res) => {
+  try {
+    const name = String(req.query.name || '').slice(0, 100);
+    const channelId = /^UC[\w-]{20,}$/.test(String(req.query.channelId || '')) ? String(req.query.channelId) : '';
+    const k = key(name);
+    const known = buildPeople().find(p => p.id === k || (channelId && p.channelId === channelId));
+    const person = known ? { ...known } : {
+      id: k, name, kind: 'creator', category: 'Entertainment', language: 'any', country: 'World', channelId, reels: 0, stories: 0,
+    };
+    const cid = channelId || person.channelId;
+
+    const seen = new Set();
+    let reelsList = allYoutubeItems()
+      .filter(a => key(a.source) === k || (cid && a.channelId === cid))
+      .filter(a => (seen.has(a.id) ? false : seen.add(a.id)));
+    if (cid && reelsList.length < 8 && YT_API_KEY) {
+      const extra = await channelShorts(cid, person.name, {
+        language: person.language || 'any', country: person.country || 'World', category: person.category || 'Entertainment',
+      });
+      reelsList = [...reelsList, ...extra.filter(a => (seen.has(a.id) ? false : seen.add(a.id)))];
+    }
+    reelsList.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    const storyList = cache.articles.filter(a => key(a.source) === k).slice(0, 60);
+
+    person.channelId = cid;
+    await fillAvatars([person]);
+    person.reels = reelsList.length;
+    person.stories = storyList.length;
+    res.json({ person: publicPerson(person), reels: reelsList.slice(0, 60), stories: storyList });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not load this creator' });
+  }
+});
+
+// ============================================================
+// Voice calls: give each person in a call a LiveKit pass for that call only
+// ============================================================
+function livekitToken(identity, room) {
+  const now = Math.floor(Date.now() / 1000);
+  const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const head = b64({ alg: 'HS256', typ: 'JWT' });
+  const body = b64({
+    iss: LIVEKIT_API_KEY,
+    sub: identity,
+    nbf: now - 10,
+    exp: now + 2 * 3600,
+    video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false },
+  });
+  const sig = crypto.createHmac('sha256', LIVEKIT_API_SECRET).update(`${head}.${body}`).digest('base64url');
+  return `${head}.${body}.${sig}`;
+}
+
+app.post('/api/call-token', async (req, res) => {
+  try {
+    if (!LIVEKIT_URL || !LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
+      return res.status(503).json({ error: 'Calls are not set up on the server yet (LiveKit keys missing on Render).' });
+    }
+    const auth = String(req.headers.authorization || '');
+    const callId = String((req.body && req.body.callId) || '');
+    if (!/^Bearer \S+$/.test(auth)) return res.status(401).json({ error: 'Please sign in' });
+    if (!/^[0-9a-f-]{36}$/i.test(callId)) return res.status(400).json({ error: 'Bad call id' });
+
+    // Ask Supabase who this is, and if they are in this call (the database rules decide)
+    const headers = { apikey: SUPABASE_KEY, Authorization: auth };
+    const [u, c] = await Promise.all([
+      fetch(`${SUPABASE_URL}/auth/v1/user`, { headers }),
+      fetch(`${SUPABASE_URL}/rest/v1/calls?id=eq.${callId}&select=id,caller_id,callee_id,status`, { headers }),
+    ]);
+    if (!u.ok) return res.status(401).json({ error: 'Please sign in again' });
+    const user = await u.json();
+    const rows = c.ok ? await c.json() : [];
+    const call = Array.isArray(rows) ? rows[0] : null;
+    if (!call || (call.caller_id !== user.id && call.callee_id !== user.id)) {
+      return res.status(403).json({ error: 'You are not in this call' });
+    }
+    if (call.status !== 'ringing' && call.status !== 'accepted') {
+      return res.status(410).json({ error: 'This call has ended' });
+    }
+    res.json({ url: LIVEKIT_URL, token: livekitToken(user.id, `call-${call.id}`) });
+  } catch (e) {
+    console.error('call-token error:', e);
+    res.status(500).json({ error: 'Could not start the call' });
+  }
+});
+
+// ============================================================
+// Notifications: tell the other phone about a new message or an incoming call
+// ============================================================
+app.post('/api/notify', async (req, res) => {
+  try {
+    const auth = String(req.headers.authorization || '');
+    const type = String((req.body && req.body.type) || '');
+    const id = String((req.body && req.body.id) || '');
+    if (!/^Bearer \S+$/.test(auth)) return res.status(401).json({ error: 'Please sign in' });
+    if (!['message', 'call'].includes(type) || !/^[0-9a-f-]{36}$/i.test(id)) {
+      return res.status(400).json({ error: 'Bad request' });
+    }
+    // The database checks that this person really sent this message / is making this call
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/push_targets`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_KEY, Authorization: auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: type, target_id: id }),
+    });
+    const rows = r.ok ? await r.json() : [];
+    if (!Array.isArray(rows) || !rows.length) return res.json({ sent: 0 });
+
+    const messages = rows.slice(0, 20).map(x => ({
+      to: x.token,
+      title: x.title,
+      body: x.body,
+      sound: 'default',
+      priority: 'high',
+      channelId: type === 'call' ? 'calls' : 'messages',
+      data: { type, ref: x.ref },
+    }));
+    const sent = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(messages),
+    });
+    if (!sent.ok) console.log('Push error:', sent.status, await sent.text());
+    res.json({ sent: messages.length });
+  } catch (e) {
+    console.error('notify error:', e);
+    res.status(500).json({ error: 'Could not send the notification' });
+  }
+});
+
 app.get('/', (req, res) => res.send('CIVIX server is running'));
 
 refresh();
 refreshReels();
 refreshYoutube();
 refreshYoutubeSearch();
+refreshCreators();
 app.listen(process.env.PORT || 4000, '0.0.0.0', () => console.log('CIVIX server running'));
