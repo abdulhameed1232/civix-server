@@ -30,25 +30,24 @@ const parser = new Parser({
 // name, url, language, country, category
 const f = (name, url, language, country, category = 'World') =>
   ({ name, url, language, country, category });
-const yt = (name, channelId, language, country) => ({
-  name: `${name} (Video)`,
-  url: `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`,
-  altUrl: `https://www.youtube.com/feeds/videos.xml?playlist_id=UULF${channelId.slice(2)}`,
-  channelId,
-  language, country, category: 'World', youtube: true,
+
+// YouTube Shorts of a channel (vertical videos for Reels)
+const ytShort = (name, channelId, language, country) => ({
+  name: `${name} Shorts`,
+  url: `https://www.youtube.com/feeds/videos.xml?playlist_id=UUSH${channelId.slice(2)}`,
+  playlistId: `UUSH${channelId.slice(2)}`,
+  language, country, category: 'World', youtube: true, short: true,
 });
 
 const BBC = 'https://feeds.bbci.co.uk';
+const GU = 'https://www.theguardian.com';
 const FEEDS = [
+  // ---------- World, politics, business ----------
   f('BBC News', `${BBC}/news/world/rss.xml`, 'en', 'World'),
   f('BBC Politics', `${BBC}/news/politics/rss.xml`, 'en', 'United Kingdom', 'Politics'),
   f('BBC Business', `${BBC}/news/business/rss.xml`, 'en', 'World', 'Business'),
-  f('BBC Technology', `${BBC}/news/technology/rss.xml`, 'en', 'World', 'Technology'),
-  f('BBC Science', `${BBC}/news/science_and_environment/rss.xml`, 'en', 'World', 'Science'),
-  f('BBC Entertainment', `${BBC}/news/entertainment_and_arts/rss.xml`, 'en', 'World', 'Entertainment'),
-  f('BBC Sport', `${BBC}/sport/rss.xml`, 'en', 'World', 'Sports'),
   f('Al Jazeera', 'https://www.aljazeera.com/xml/rss/all.xml', 'en', 'Qatar'),
-  f('The Guardian', 'https://www.theguardian.com/world/rss', 'en', 'United Kingdom'),
+  f('The Guardian', `${GU}/world/rss`, 'en', 'United Kingdom'),
   f('NPR', 'https://feeds.npr.org/1001/rss.xml', 'en', 'United States'),
   f('DW', 'https://rss.dw.com/rdf/rss-en-all', 'en', 'Germany'),
   f('France 24', 'https://www.france24.com/en/rss', 'en', 'France'),
@@ -58,13 +57,38 @@ const FEEDS = [
   f('Dawn', 'https://www.dawn.com/feeds/home', 'en', 'Pakistan'),
   f('The National', 'https://www.thenationalnews.com/arc/outboundfeeds/rss/?outputType=xml', 'en', 'UAE'),
 
+  // ---------- Topics ----------
+  f('BBC Technology', `${BBC}/news/technology/rss.xml`, 'en', 'World', 'Technology'),
+  f('The Verge', 'https://www.theverge.com/rss/index.xml', 'en', 'United States', 'Technology'),
+  f('TechCrunch', 'https://techcrunch.com/feed/', 'en', 'United States', 'Technology'),
+  f('IGN', 'https://feeds.feedburner.com/ign/all', 'en', 'United States', 'Gaming'),
+  f('Polygon', 'https://www.polygon.com/rss/index.xml', 'en', 'United States', 'Gaming'),
+  f('PC Gamer', 'https://www.pcgamer.com/rss/', 'en', 'United Kingdom', 'Gaming'),
+  f('BBC Sport', `${BBC}/sport/rss.xml`, 'en', 'World', 'Sports'),
+  f('ESPN', 'https://www.espn.com/espn/rss/news', 'en', 'United States', 'Sports'),
+  f('BBC Science', `${BBC}/news/science_and_environment/rss.xml`, 'en', 'World', 'Science'),
+  f('NASA', 'https://www.nasa.gov/feed/', 'en', 'United States', 'Science'),
+  f('BBC Entertainment', `${BBC}/news/entertainment_and_arts/rss.xml`, 'en', 'World', 'Entertainment'),
+  f('Guardian Film', `${GU}/film/rss`, 'en', 'United Kingdom', 'Movies'),
+  f('Variety', 'https://variety.com/feed/', 'en', 'United States', 'Movies'),
+  f('Rolling Stone', 'https://www.rollingstone.com/music/feed/', 'en', 'United States', 'Music'),
+  f('NME', 'https://www.nme.com/feed', 'en', 'United Kingdom', 'Music'),
+  f('Guardian Travel', `${GU}/travel/rss`, 'en', 'United Kingdom', 'Travel'),
+  f('Guardian Food', `${GU}/food/rss`, 'en', 'United Kingdom', 'Food'),
+  f('Guardian Fashion', `${GU}/fashion/rss`, 'en', 'United Kingdom', 'Fashion'),
+  f('Guardian Art', `${GU}/artanddesign/rss`, 'en', 'United Kingdom', 'Art'),
+  f('PetaPixel', 'https://petapixel.com/feed/', 'en', 'United States', 'Photography'),
+  f('Guardian Environment', `${GU}/environment/rss`, 'en', 'United Kingdom', 'Nature'),
+  f('Mongabay', 'https://news.mongabay.com/feed/', 'en', 'World', 'Nature'),
+  f('Guardian Education', `${GU}/education/rss`, 'en', 'United Kingdom', 'Education'),
+
+  // ---------- Other languages ----------
   f('BBC Hindi', `${BBC}/hindi/rss.xml`, 'hi', 'India'),
   f('BBC Telugu', `${BBC}/telugu/rss.xml`, 'te', 'India'),
   f('BBC Tamil', `${BBC}/tamil/rss.xml`, 'ta', 'India'),
   f('BBC Marathi', `${BBC}/marathi/rss.xml`, 'mr', 'India'),
   f('BBC Bengali', `${BBC}/bengali/rss.xml`, 'bn', 'Bangladesh'),
   f('BBC Urdu', `${BBC}/urdu/rss.xml`, 'ur', 'Pakistan'),
-
   f('BBC Arabic', `${BBC}/arabic/rss.xml`, 'ar', 'World'),
   f('BBC Mundo', `${BBC}/mundo/rss.xml`, 'es', 'World'),
   f('BBC Brasil', `${BBC}/portuguese/rss.xml`, 'pt', 'World'),
@@ -81,19 +105,21 @@ const FEEDS = [
   f('France 24 Arabic', 'https://www.france24.com/ar/rss', 'ar', 'France'),
   f('NHK', 'https://www3.nhk.or.jp/rss/news/cat0.xml', 'ja', 'Japan'),
 
-  yt('BBC News', 'UCCj956IF62FbT7Gouszaj9w', 'en', 'World'),
-  yt('Al Jazeera English', 'UCNye-wNBqNL5ZzHSJj3l8Bg', 'en', 'Qatar'),
-  yt('DW News', 'UCknLrEdhRCp1aegoMqRaCZg', 'en', 'Germany'),
-  yt('France 24 English', 'UCQfwfsi5VrQ8yKZ-UWmAEFg', 'en', 'France'),
-  yt('Sky News', 'UCoMdktPbSTixAyNGwb-UYkQ', 'en', 'United Kingdom'),
-  yt('euronews', 'UCSrZ3UV4jOidv8ppoVuvW9Q', 'en', 'World'),
-  yt('WION', 'UC_gUM8rL-Lrg6O3adPW9K1g', 'en', 'India'),
-  yt('NDTV', 'UCZFMm1mMw0F81Z37aaEzTUA', 'en', 'India'),
-  yt('India Today', 'UCYPvAwZP8pZhSMW8qs7cVCw', 'en', 'India'),
-  yt('Aaj Tak', 'UCt4t-jeY85JegMlZ-E5UWtA', 'hi', 'India'),
-  yt('ABP News', 'UCRWFSbif-RFENbBrSiez1DA', 'hi', 'India'),
-  yt('TRT World', 'UC7fWeaHhqgM4Ry-RMpZKQEA', 'en', 'World'),
-  yt('Al Jazeera Arabic', 'UCfiwzLy-8yKzIbsmZTzxDgw', 'ar', 'Qatar'),
+  // ---------- Reels: YouTube Shorts ----------
+  ytShort('BBC News', 'UCCj956IF62FbT7Gouszaj9w', 'en', 'World'),
+  ytShort('Al Jazeera English', 'UCNye-wNBqNL5ZzHSJj3l8Bg', 'en', 'Qatar'),
+  ytShort('DW News', 'UCknLrEdhRCp1aegoMqRaCZg', 'en', 'Germany'),
+  ytShort('France 24 English', 'UCQfwfsi5VrQ8yKZ-UWmAEFg', 'en', 'France'),
+  ytShort('Sky News', 'UCoMdktPbSTixAyNGwb-UYkQ', 'en', 'United Kingdom'),
+  ytShort('euronews', 'UCSrZ3UV4jOidv8ppoVuvW9Q', 'en', 'World'),
+  ytShort('WION', 'UC_gUM8rL-Lrg6O3adPW9K1g', 'en', 'India'),
+  ytShort('NDTV', 'UCZFMm1mMw0F81Z37aaEzTUA', 'en', 'India'),
+  ytShort('India Today', 'UCYPvAwZP8pZhSMW8qs7cVCw', 'en', 'India'),
+  ytShort('Aaj Tak', 'UCt4t-jeY85JegMlZ-E5UWtA', 'hi', 'India'),
+  ytShort('ABP News', 'UCRWFSbif-RFENbBrSiez1DA', 'hi', 'India'),
+  ytShort('TRT World', 'UC7fWeaHhqgM4Ry-RMpZKQEA', 'en', 'World'),
+  ytShort('Al Jazeera Arabic', 'UCfiwzLy-8yKzIbsmZTzxDgw', 'ar', 'Qatar'),
+  ytShort('Dhruv Rathee', 'UC-CSyyi47VX1lD9zyeABW3w', 'hi', 'India'),
 ];
 
 const TTL = 10 * 60 * 1000;
@@ -127,17 +153,24 @@ const imgInHtml = html => {
   return m ? m[1] : undefined;
 };
 
+// Use the biggest picture a source offers
 function pickMedia(item) {
   let image;
+  let imageWidth = -1;
   let video;
   for (const c of item.mediaContent || []) {
     const a = c.$ || {};
     if (!a.url) continue;
     const type = (a.type || '').toLowerCase();
     const medium = (a.medium || '').toLowerCase();
-    if (type.startsWith('video/') || medium === 'video') video = video || a.url;
-    else if (type.startsWith('image/') || medium === 'image' || /\.(jpe?g|png|webp)(\?|$)/i.test(a.url)) {
-      image = image || a.url;
+    if (type.startsWith('video/') || medium === 'video') {
+      video = video || a.url;
+    } else if (type.startsWith('image/') || medium === 'image' || /\.(jpe?g|png|webp)(\?|$)/i.test(a.url)) {
+      const w = parseInt(a.width, 10) || 0;
+      if (!image || w > imageWidth) {
+        image = a.url;
+        imageWidth = w;
+      }
     }
   }
   const thumb = (item.mediaThumbnail || [])[0];
@@ -150,6 +183,11 @@ function pickMedia(item) {
     else if (t.startsWith('image/') && !image) image = enc.url;
   }
   if (!image) image = imgInHtml(item['content:encoded'] || item.content || item.description);
+
+  if (image) {
+    image = image.replace('http://', 'https://');
+    if (/bbci\.co\.uk|bbc\.co\.uk/.test(image)) image = image.replace('/240/', '/976/'); // BBC: bigger version
+  }
   return { image, video };
 }
 
@@ -178,6 +216,7 @@ function toArticle(feed, item) {
     article.id = md5('yt:' + id);
     article.videoUrl = `https://www.youtube.com/embed/${id}`;
     article.videoType = 'youtube';
+    article.isShort = !!feed.short;
     article.imageUrl = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
     const desc = item.mediaGroup && item.mediaGroup['media:description'];
     if (desc && desc[0]) article.description = stripHtml(desc[0]).slice(0, 300);
@@ -189,7 +228,7 @@ function toArticle(feed, item) {
 }
 
 // ---- Keep only YouTube videos that are allowed to play inside other apps ----
-const embedCache = new Map(); // videoId -> true / false
+const embedCache = new Map();
 
 async function canEmbed(videoId) {
   if (embedCache.has(videoId)) return embedCache.get(videoId);
@@ -203,12 +242,12 @@ async function canEmbed(videoId) {
       return true;
     }
     if (res.status === 401 || res.status === 403 || res.status === 404) {
-      embedCache.set(videoId, false); // embedding disabled, private or removed
+      embedCache.set(videoId, false);
       return false;
     }
-    return true; // unknown answer: keep the video
+    return true;
   } catch (e) {
-    return true; // network trouble: keep the video
+    return true;
   }
 }
 
@@ -220,10 +259,9 @@ async function filterEmbeddable(articles) {
 }
 
 async function fetchYoutubeApi(feed) {
-  const playlistId = 'UU' + feed.channelId.slice(2);
   const url =
     'https://www.googleapis.com/youtube/v3/playlistItems?part=snippet' +
-    `&maxResults=${MAX_PER_FEED}&playlistId=${playlistId}&key=${YT_API_KEY}`;
+    `&maxResults=${MAX_PER_FEED}&playlistId=${feed.playlistId}&key=${YT_API_KEY}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`YouTube API status ${res.status}`);
   const data = await res.json();
@@ -245,19 +283,18 @@ async function fetchYoutubeApi(feed) {
         imageUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
         videoUrl: `https://www.youtube.com/embed/${id}`,
         videoType: 'youtube',
+        isShort: !!feed.short,
       };
     })
     .filter(Boolean);
 }
 
 async function fetchFeed(feed) {
-  const urls = [feed.url];
-  if (feed.altUrl) urls.push(feed.altUrl);
   let lastError;
 
-  for (const url of urls) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const data = await parser.parseURL(url);
+      const data = await parser.parseURL(feed.url);
       let articles = (data.items || [])
         .slice(0, MAX_PER_FEED)
         .map(item => toArticle(feed, item))
@@ -332,9 +369,9 @@ function refresh() {
       .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
 
     cache = { at: Date.now(), articles, failed };
-    const videos = articles.filter(a => a.videoUrl).length;
+    const shorts = articles.filter(a => a.isShort).length;
     console.log(
-      `Loaded ${articles.length} items (${videos} videos). ` +
+      `Loaded ${articles.length} items (${shorts} shorts). ` +
       `Failed: ${failed.join(', ') || 'none'}. ` +
       `Using saved copy: ${stale.join(', ') || 'none'}`
     );
@@ -349,29 +386,40 @@ function refresh() {
     .finally(() => {
       refreshing = null;
       clearTimeout(timer);
-      const videos = cache.articles.filter(a => a.videoUrl).length;
-      timer = setTimeout(refresh, videos === 0 ? RETRY : TTL);
+      const shorts = cache.articles.filter(a => a.isShort).length;
+      timer = setTimeout(refresh, shorts === 0 ? RETRY : TTL);
     });
   return refreshing;
 }
+
+// "en,hi" -> ['en', 'hi']
+const parts = v => String(v).toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
 
 app.get('/api/news', async (req, res) => {
   try {
     if (!cache.articles.length) await refresh();
     else if (Date.now() - cache.at > TTL) refresh();
 
-    const { country, language, category, video, stories, limit } = req.query;
+    const { country, language, category, video, shorts, stories, limit } = req.query;
     let list = cache.articles;
-    if (country) list = list.filter(a => a.country.toLowerCase() === String(country).toLowerCase());
-    if (language) list = list.filter(a => a.language.toLowerCase() === String(language).toLowerCase());
-    if (category) list = list.filter(a => a.category.toLowerCase() === String(category).toLowerCase());
+    if (country) {
+      const set = parts(country);
+      list = list.filter(a => set.includes(String(a.country).toLowerCase()));
+    }
+    if (language) {
+      const set = parts(language);
+      list = list.filter(a => set.includes(String(a.language).toLowerCase()));
+    }
+    if (category) {
+      const set = parts(category);
+      list = list.filter(a => set.includes(String(a.category).toLowerCase()));
+    }
     if (video) list = list.filter(a => !!a.videoUrl);
+    if (shorts) list = list.filter(a => a.isShort);
     if (stories) list = list.filter(a => !a.videoUrl);
 
-    const out = list.slice(0, Number(limit) || 300);
-
     res.json({
-      articles: out,
+      articles: list.slice(0, Number(limit) || 300),
       updatedAt: new Date(cache.at).toISOString(),
       feedsFailed: cache.failed,
     });
