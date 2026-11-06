@@ -132,7 +132,59 @@ const YT_CHANNELS = [
   ['NASA', 'UCLA_DiR1FfKNvjuUpBHmylQ', 'en', 'United States', 'Science'],
   ['National Geographic', 'UCpVm7bg6pXKo1Pr6k5kxG9A', 'en', 'World', 'Nature'],
 ];
-const YT_EVERY = 30 * 60 * 1000; // check channels for new Shorts every 30 minutes
+const YT_EVERY = 60 * 60 * 1000; // check channels for new Shorts every hour
+
+// ---------- Reels: popular Shorts from ALL creators, found by topic search ----------
+// search words, app topic, language, country code
+// safeSearch=strict keeps adult content out. Each search costs 100 of the free 10,000 daily
+// YouTube units, so these run every 12 hours, and each language once a day.
+const YT_SEARCHES = [
+  ['football cricket sports highlights', 'Sports', 'en', 'IN'],
+  ['gaming', 'Gaming', 'en', 'US'],
+  ['tech gadgets', 'Technology', 'en', 'US'],
+  ['science facts', 'Science', 'en', 'US'],
+  ['space astronomy', 'Science', 'en', 'US'],
+  ['music cover singing', 'Music', 'en', 'IN'],
+  ['dance', 'Music', 'en', 'IN'],
+  ['comedy funny', 'Entertainment', 'en', 'IN'],
+  ['movie trailer bollywood hollywood', 'Movies', 'en', 'IN'],
+  ['travel vlog', 'Travel', 'en', 'IN'],
+  ['street food recipe', 'Food', 'en', 'IN'],
+  ['fashion outfit', 'Fashion', 'en', 'IN'],
+  ['art drawing painting', 'Art', 'en', 'US'],
+  ['photography tips', 'Photography', 'en', 'US'],
+  ['animals wildlife nature', 'Nature', 'en', 'US'],
+  ['study tips learn english', 'Education', 'en', 'IN'],
+  ['business startup motivation', 'Business', 'en', 'IN'],
+];
+
+// ---------- Creator Shorts in every language (fetched only when someone picks that language) ----------
+// language code: [country code, entertainment search, music search, food search]
+const LANG_SEARCHES = {
+  hi: ['IN', 'हिंदी कॉमेडी', 'हिंदी गाने', 'खाना रेसिपी'],
+  te: ['IN', 'తెలుగు comedy', 'తెలుగు songs', 'తెలుగు వంటలు'],
+  ta: ['IN', 'தமிழ் comedy', 'தமிழ் பாடல்', 'தமிழ் சமையல்'],
+  bn: ['BD', 'বাংলা ফানি', 'বাংলা গান', 'বাংলা রান্না'],
+  mr: ['IN', 'मराठी कॉमेडी', 'मराठी गाणी', 'मराठी रेसिपी'],
+  ur: ['PK', 'اردو مزاحیہ', 'اردو گانے', 'پاکستانی کھانا'],
+  ar: ['AE', 'مضحك', 'اغاني', 'طبخ'],
+  es: ['MX', 'humor', 'música', 'recetas'],
+  fr: ['FR', 'humour', 'musique', 'recette'],
+  de: ['DE', 'lustig', 'musik', 'rezept'],
+  pt: ['BR', 'engraçado', 'música', 'receita'],
+  ru: ['RU', 'смешно', 'музыка', 'рецепт'],
+  zh: ['TW', '搞笑', '音乐', '美食'],
+  ja: ['JP', '面白い', '音楽', '料理'],
+  id: ['ID', 'lucu', 'musik', 'resep'],
+  tr: ['TR', 'komik', 'müzik', 'tarif'],
+  sw: ['KE', 'vichekesho', 'muziki', 'mapishi'],
+  fa: ['', 'خنده دار', 'موسیقی', 'آشپزی'],
+};
+const LANG_CATEGORIES = ['Entertainment', 'Music', 'Food'];
+const LANG_EVERY = 24 * 60 * 60 * 1000; // each language refreshes once a day
+const YT_CACHE_FILE = path.join(__dirname, 'yt-cache.json');
+const YT_SEARCH_EVERY = 12 * 60 * 60 * 1000;
+
 
 const TTL = 10 * 60 * 1000;          // news: refresh every 10 minutes
 const REELS_TTL = 60 * 60 * 1000;    // reels: every hour (keeps Pexels free limits safe)
@@ -391,48 +443,72 @@ function isoSeconds(iso) {
   return (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0);
 }
 
+// Turn a list of { id, title, publishedAt, channel } into reels.
+// Keeps only public videos that other apps may play, up to 3 minutes long.
+async function toYoutubeReels(items, info) {
+  if (!items.length) return [];
+  const ids = items.map(x => x.id);
+  const ok = new Map();
+  for (let i = 0; i < ids.length; i += 50) {
+    const data = await ytGet(`videos?part=status,contentDetails&id=${ids.slice(i, i + 50).join(',')}`);
+    for (const v of data.items || []) {
+      const secs = isoSeconds(v.contentDetails && v.contentDetails.duration);
+      const st = v.status || {};
+      if (st.embeddable && st.privacyStatus === 'public' && !st.madeForKids && secs > 0 && secs <= 180) {
+        ok.set(v.id, secs);
+      }
+    }
+  }
+  return items
+    .filter(x => ok.has(x.id))
+    .map(x => ({
+      id: md5('yt:' + x.id),
+      title: stripHtml(x.title),
+      description: x.channel,
+      author: x.channel,
+      link: `https://www.youtube.com/shorts/${x.id}`,
+      publishedAt: new Date(x.publishedAt || Date.now()).toISOString(),
+      source: x.channel,
+      language: info.language,
+      country: info.country,
+      category: info.category,
+      imageUrl: `https://i.ytimg.com/vi/${x.id}/hqdefault.jpg`,
+      videoUrl: `https://www.youtube.com/embed/${x.id}`,
+      videoType: 'youtube',
+      isShort: true,
+      vertical: true,
+      duration: ok.get(x.id),
+    }));
+}
+
 async function fetchChannelShorts([name, channelId, language, country, category]) {
   const playlistId = 'UUSH' + channelId.slice(2); // the channel's Shorts list
   const list = await ytGet(`playlistItems?part=snippet&maxResults=20&playlistId=${playlistId}`);
   const items = (list.items || [])
     .map(it => it.snippet || {})
-    .filter(sn => sn.resourceId && sn.resourceId.videoId && sn.title !== 'Private video' && sn.title !== 'Deleted video');
-  if (!items.length) return [];
+    .filter(sn => sn.resourceId && sn.resourceId.videoId && sn.title !== 'Private video' && sn.title !== 'Deleted video')
+    .map(sn => ({ id: sn.resourceId.videoId, title: sn.title, publishedAt: sn.publishedAt, channel: name }));
+  return toYoutubeReels(items, { language, country, category });
+}
 
-  // Keep only public videos that other apps are allowed to play, up to 3 minutes
-  const ids = items.map(sn => sn.resourceId.videoId);
-  const info = await ytGet(`videos?part=status,contentDetails&id=${ids.join(',')}`);
-  const ok = new Map();
-  for (const v of info.items || []) {
-    const secs = isoSeconds(v.contentDetails && v.contentDetails.duration);
-    if (v.status && v.status.embeddable && v.status.privacyStatus === 'public' && secs > 0 && secs <= 180) {
-      ok.set(v.id, secs);
-    }
-  }
-
-  return items
-    .filter(sn => ok.has(sn.resourceId.videoId))
-    .map(sn => {
-      const id = sn.resourceId.videoId;
-      return {
-        id: md5('yt:' + id),
-        title: stripHtml(sn.title),
-        description: name,
-        author: name,
-        link: `https://www.youtube.com/shorts/${id}`,
-        publishedAt: new Date(sn.publishedAt || Date.now()).toISOString(),
-        source: name,
-        language,
-        country,
-        category,
-        imageUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
-        videoUrl: `https://www.youtube.com/embed/${id}`,
-        videoType: 'youtube',
-        isShort: true,
-        vertical: true,
-        duration: ok.get(id),
-      };
-    });
+// Popular Shorts from any creator for one topic, from the last 2 weeks
+async function fetchSearchShorts([query, category, language, region]) {
+  const since = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
+  const q = encodeURIComponent(`${query} #shorts`);
+  const data = await ytGet(
+    `search?part=snippet&type=video&videoDuration=short&videoEmbeddable=true&safeSearch=strict` +
+    `&order=viewCount&maxResults=50&q=${q}&publishedAfter=${since}` +
+    (region ? `&regionCode=${region}` : '') + `&relevanceLanguage=${language}`
+  );
+  const items = (data.items || [])
+    .filter(it => it.id && it.id.videoId && it.snippet)
+    .map(it => ({
+      id: it.id.videoId,
+      title: it.snippet.title,
+      publishedAt: it.snippet.publishedAt,
+      channel: stripHtml(it.snippet.channelTitle),
+    }));
+  return toYoutubeReels(items, { language, country: 'World', category });
 }
 
 let ytReels = { at: 0, items: [], failed: [] };
@@ -466,6 +542,96 @@ function refreshYoutube() {
       ytTimer = setTimeout(refreshYoutube, ytReels.items.length ? YT_EVERY : RETRY);
     });
   return ytRefreshing;
+}
+
+let ytSearch = { at: 0, items: [], failed: [] };
+let langShorts = {}; // language code -> { at, items, pending }
+
+// Remember YouTube results on disk, so a restart does not spend the daily limit again
+try {
+  const saved = JSON.parse(fs.readFileSync(YT_CACHE_FILE, 'utf8'));
+  if (saved.ytSearch) ytSearch = saved.ytSearch;
+  if (saved.langShorts) langShorts = saved.langShorts;
+  for (const code of Object.keys(langShorts)) langShorts[code].pending = false;
+  console.log(`Loaded saved creator Shorts: ${ytSearch.items.length} + ${Object.keys(langShorts).length} languages`);
+} catch (e) { }
+
+function saveYtCache() {
+  try {
+    fs.writeFileSync(YT_CACHE_FILE, JSON.stringify({ ytSearch, langShorts }));
+  } catch (e) {
+    console.log('Could not save YouTube cache:', e.message);
+  }
+}
+
+// Fetch creator Shorts for one language, if they are missing or older than a day
+function ensureLanguage(code) {
+  if (!YT_API_KEY || !LANG_SEARCHES[code]) return;
+  const cur = langShorts[code];
+  const age = cur ? Date.now() - cur.at : Infinity;
+  const wait = cur && cur.items.length ? LANG_EVERY : 60 * 60 * 1000;
+  if (cur && (cur.pending || age < wait)) return;
+  langShorts[code] = { at: cur ? cur.at : 0, items: cur ? cur.items : [], pending: true };
+
+  (async () => {
+    const [region, ...queries] = LANG_SEARCHES[code];
+    const jobs = queries.map((q, i) => [q, LANG_CATEGORIES[i] || 'Entertainment', code, region]);
+    const results = await runLimited(jobs, 2, fetchSearchShorts);
+    const all = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') all.push(...r.value);
+      else console.log(`  x ${code} search "${jobs[i][0]}": ${r.reason.message}`);
+    });
+    const seen = new Set();
+    const items = all.filter(a => (seen.has(a.id) ? false : seen.add(a.id)));
+    langShorts[code] = items.length
+      ? { at: Date.now(), items, pending: false }
+      : { at: Date.now(), items: (cur && cur.items) || [], pending: false };
+    console.log(`Creator Shorts [${code}]: ${items.length} loaded`);
+    saveYtCache();
+  })().catch(e => {
+    console.error(`Creator Shorts [${code}] error:`, e);
+    langShorts[code].pending = false;
+  });
+}
+let ytSearchRefreshing = null;
+let ytSearchTimer = null;
+
+function refreshYoutubeSearch() {
+  if (ytSearchRefreshing) return ytSearchRefreshing;
+  const age = Date.now() - ytSearch.at;
+  if (ytSearch.items.length && age < YT_SEARCH_EVERY) {
+    // saved copy is still fresh: just schedule the next refresh
+    clearTimeout(ytSearchTimer);
+    ytSearchTimer = setTimeout(refreshYoutubeSearch, YT_SEARCH_EVERY - age);
+    return Promise.resolve();
+  }
+  ytSearchRefreshing = (async () => {
+    if (!YT_API_KEY) return;
+    const results = await runLimited(YT_SEARCHES, 3, fetchSearchShorts);
+    const all = [];
+    const failed = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') all.push(...r.value);
+      else {
+        failed.push(YT_SEARCHES[i][0]);
+        console.log(`  x search "${YT_SEARCHES[i][0]}": ${r.reason.message}`);
+      }
+    });
+    const seen = new Set();
+    const items = all.filter(a => (seen.has(a.id) ? false : seen.add(a.id)));
+    if (items.length) ytSearch = { at: Date.now(), items, failed };
+    console.log(`Creator Shorts: ${items.length} loaded. Failed: ${failed.join(', ') || 'none'}`);
+    saveYtCache();
+  })()
+    .catch(e => console.error('Creator Shorts error:', e))
+    .finally(() => {
+      ytSearchRefreshing = null;
+      clearTimeout(ytSearchTimer);
+      // if the daily quota ran out, try again in an hour
+      ytSearchTimer = setTimeout(refreshYoutubeSearch, ytSearch.items.length ? YT_SEARCH_EVERY : 60 * 60 * 1000);
+    });
+  return ytSearchRefreshing;
 }
 
 function shuffle(list) {
@@ -625,25 +791,36 @@ app.get('/api/news', async (req, res) => {
 
     // Reels: stock videos + YouTube Shorts mixed together
     if (shorts) {
-      if (!reels.items.length && !ytReels.items.length) {
-        await Promise.all([refreshReels(), refreshYoutube()]);
+      if (!reels.items.length && !ytReels.items.length && !ytSearch.items.length) {
+        await Promise.all([refreshReels(), refreshYoutube(), refreshYoutubeSearch()]);
       }
-      const stock = applyFilters(reels.items, req.query).filter(a => a.vertical !== false);
-      const news = applyFilters(ytReels.items, req.query);
-      const mix = l => [...shuffle(l.slice(0, 60)), ...shuffle(l.slice(60))];
-      const a = mix(stock);
-      const b = shuffle(news);
-      // About 2 stock videos for every 1 news Short
+      const stock = shuffle(applyFilters(reels.items, req.query).filter(a => a.vertical !== false));
+      const news = shuffle(applyFilters(ytReels.items, req.query));
+      // Creator Shorts in the languages this person picked (World = every language we have)
+      const wanted = req.query.language ? parts(req.query.language) : Object.keys(langShorts);
+      wanted.forEach(ensureLanguage);
+      const langItems = wanted.flatMap(code => (langShorts[code] ? langShorts[code].items : []));
+      const creators = shuffle(applyFilters([...ytSearch.items, ...langItems], req.query));
+      // Mix: creator Short, news Short, creator Short, stock video, ...
       const mixed = [];
-      while (a.length || b.length) {
-        if (a.length) mixed.push(a.shift());
-        if (a.length) mixed.push(a.shift());
-        if (b.length) mixed.push(b.shift());
+      const seenIds = new Set();
+      const take = l => {
+        while (l.length) {
+          const x = l.shift();
+          if (!seenIds.has(x.id)) { seenIds.add(x.id); mixed.push(x); return; }
+        }
+      };
+      while (stock.length || news.length || creators.length) {
+        take(creators);
+        take(news);
+        take(creators);
+        take(stock);
       }
       return res.json({
         articles: mixed.slice(0, max),
-        updatedAt: new Date(Math.max(reels.at, ytReels.at)).toISOString(),
-        feedsFailed: [...reels.failed, ...ytReels.failed],
+        updatedAt: new Date(Math.max(reels.at, ytReels.at, ytSearch.at)).toISOString(),
+        feedsFailed: [...reels.failed, ...ytReels.failed, ...ytSearch.failed],
+        languagesLoading: wanted.filter(code => langShorts[code] && langShorts[code].pending),
       });
     }
 
@@ -671,4 +848,5 @@ app.get('/', (req, res) => res.send('CIVIX server is running'));
 refresh();
 refreshReels();
 refreshYoutube();
+refreshYoutubeSearch();
 app.listen(process.env.PORT || 4000, '0.0.0.0', () => console.log('CIVIX server running'));
