@@ -8,6 +8,8 @@ const path = require('path');
 // Free video keys for Reels (set them on Render, never here).
 // Pixabay is used first; Pexels is used too if you ever get a key.
 const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY || '';
+// Free YouTube Data API key for news Shorts (set it on Render as YT_API_KEY)
+const YT_API_KEY = process.env.YT_API_KEY || '';
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY || '';
 
 const app = express();
@@ -108,6 +110,29 @@ const REEL_TOPICS = [
   ['fashion', 'Fashion'], ['art', 'Art'],
   ['photography', 'Photography'], ['study', 'Education'],
 ];
+
+// ---------- Reels: YouTube Shorts from news and other channels (need YT_API_KEY) ----------
+// name, channel id, language, country, topic
+const YT_CHANNELS = [
+  ['BBC News', 'UC16niRr50-MSBwiO3YDb3RA', 'en', 'United Kingdom', 'World'],
+  ['Al Jazeera English', 'UCNye-wNBqNL5ZzHSJj3l8Bg', 'en', 'Qatar', 'World'],
+  ['DW News', 'UCknLrEdhRCp1aegoMqRaCZg', 'en', 'Germany', 'World'],
+  ['France 24 English', 'UCQfwfsi5VrQ8yKZ-UWmAEFg', 'en', 'France', 'World'],
+  ['Sky News', 'UCoMdktPbSTixAyNGwb-UYkQ', 'en', 'United Kingdom', 'World'],
+  ['euronews', 'UCSrZ3UV4jOidv8ppoVuvW9Q', 'en', 'World', 'World'],
+  ['WION', 'UC_gUM8rL-Lrg6O3adPW9K1g', 'en', 'India', 'World'],
+  ['NDTV', 'UCZFMm1mMw0F81Z37aaEzTUA', 'en', 'India', 'World'],
+  ['India Today', 'UCYPvAwZP8pZhSMW8qs7cVCw', 'en', 'India', 'World'],
+  ['TRT World', 'UC7fWeaHhqgM4Ry-RMpZKQEA', 'en', 'World', 'World'],
+  ['Aaj Tak', 'UCt4t-jeY85JegMlZ-E5UWtA', 'hi', 'India', 'World'],
+  ['ABP News', 'UCRWFSbif-RFENbBrSiez1DA', 'hi', 'India', 'World'],
+  ['Dhruv Rathee', 'UC-CSyyi47VX1lD9zyeABW3w', 'hi', 'India', 'Education'],
+  ['Al Jazeera Arabic', 'UCfiwzLy-8yKzIbsmZTzxDgw', 'ar', 'Qatar', 'World'],
+  ['ESPN', 'UCiWLfSweyRNmLpgEHekhoAg', 'en', 'United States', 'Sports'],
+  ['NASA', 'UCLA_DiR1FfKNvjuUpBHmylQ', 'en', 'United States', 'Science'],
+  ['National Geographic', 'UCpVm7bg6pXKo1Pr6k5kxG9A', 'en', 'World', 'Nature'],
+];
+const YT_EVERY = 30 * 60 * 1000; // check channels for new Shorts every 30 minutes
 
 const TTL = 10 * 60 * 1000;          // news: refresh every 10 minutes
 const REELS_TTL = 60 * 60 * 1000;    // reels: every hour (keeps Pexels free limits safe)
@@ -352,6 +377,97 @@ async function fetchReelsTopic(topic) {
   return ok;
 }
 
+// ---------- YouTube Shorts reels ----------
+async function ytGet(pathAndQuery) {
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/${pathAndQuery}&key=${YT_API_KEY}`);
+  if (!res.ok) throw new Error(`YouTube API status ${res.status}`);
+  return res.json();
+}
+
+// "PT1M5S" -> 65
+function isoSeconds(iso) {
+  const m = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/.exec(iso || '');
+  if (!m) return 0;
+  return (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0);
+}
+
+async function fetchChannelShorts([name, channelId, language, country, category]) {
+  const playlistId = 'UUSH' + channelId.slice(2); // the channel's Shorts list
+  const list = await ytGet(`playlistItems?part=snippet&maxResults=20&playlistId=${playlistId}`);
+  const items = (list.items || [])
+    .map(it => it.snippet || {})
+    .filter(sn => sn.resourceId && sn.resourceId.videoId && sn.title !== 'Private video' && sn.title !== 'Deleted video');
+  if (!items.length) return [];
+
+  // Keep only public videos that other apps are allowed to play, up to 3 minutes
+  const ids = items.map(sn => sn.resourceId.videoId);
+  const info = await ytGet(`videos?part=status,contentDetails&id=${ids.join(',')}`);
+  const ok = new Map();
+  for (const v of info.items || []) {
+    const secs = isoSeconds(v.contentDetails && v.contentDetails.duration);
+    if (v.status && v.status.embeddable && v.status.privacyStatus === 'public' && secs > 0 && secs <= 180) {
+      ok.set(v.id, secs);
+    }
+  }
+
+  return items
+    .filter(sn => ok.has(sn.resourceId.videoId))
+    .map(sn => {
+      const id = sn.resourceId.videoId;
+      return {
+        id: md5('yt:' + id),
+        title: stripHtml(sn.title),
+        description: name,
+        author: name,
+        link: `https://www.youtube.com/shorts/${id}`,
+        publishedAt: new Date(sn.publishedAt || Date.now()).toISOString(),
+        source: name,
+        language,
+        country,
+        category,
+        imageUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+        videoUrl: `https://www.youtube.com/embed/${id}`,
+        videoType: 'youtube',
+        isShort: true,
+        vertical: true,
+        duration: ok.get(id),
+      };
+    });
+}
+
+let ytReels = { at: 0, items: [], failed: [] };
+let ytRefreshing = null;
+let ytTimer = null;
+
+function refreshYoutube() {
+  if (ytRefreshing) return ytRefreshing;
+  ytRefreshing = (async () => {
+    if (!YT_API_KEY) {
+      console.log('No YT_API_KEY set on Render, so news Shorts are off');
+      return;
+    }
+    const results = await runLimited(YT_CHANNELS, 4, fetchChannelShorts);
+    const all = [];
+    const failed = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') all.push(...r.value);
+      else {
+        failed.push(YT_CHANNELS[i][0]);
+        console.log(`  x shorts "${YT_CHANNELS[i][0]}": ${r.reason.message}`);
+      }
+    });
+    if (all.length) ytReels = { at: Date.now(), items: all, failed };
+    console.log(`YouTube Shorts: ${all.length} loaded. Failed: ${failed.join(', ') || 'none'}`);
+  })()
+    .catch(e => console.error('YouTube refresh error:', e))
+    .finally(() => {
+      ytRefreshing = null;
+      clearTimeout(ytTimer);
+      ytTimer = setTimeout(refreshYoutube, ytReels.items.length ? YT_EVERY : RETRY);
+    });
+  return ytRefreshing;
+}
+
 function shuffle(list) {
   const a = [...list];
   for (let i = a.length - 1; i > 0; i--) {
@@ -507,21 +623,27 @@ app.get('/api/news', async (req, res) => {
     const { video, shorts, stories, limit } = req.query;
     const max = Number(limit) || 300;
 
-    // Reels
+    // Reels: stock videos + YouTube Shorts mixed together
     if (shorts) {
-      if (!reels.items.length) await refreshReels();
-      // Newest 60 first (mixed), then the rest of the pool in random order,
-      // so every visit shows a different set
-      // Tall (phone-shaped) videos come first, wide ones after
-      const list = applyFilters(reels.items, req.query);
-      const tall = list.filter(a => a.vertical !== false);
-      const wide = list.filter(a => a.vertical === false);
+      if (!reels.items.length && !ytReels.items.length) {
+        await Promise.all([refreshReels(), refreshYoutube()]);
+      }
+      const stock = applyFilters(reels.items, req.query).filter(a => a.vertical !== false);
+      const news = applyFilters(ytReels.items, req.query);
       const mix = l => [...shuffle(l.slice(0, 60)), ...shuffle(l.slice(60))];
-      const mixed = [...mix(tall), ...mix(wide)];
+      const a = mix(stock);
+      const b = shuffle(news);
+      // About 2 stock videos for every 1 news Short
+      const mixed = [];
+      while (a.length || b.length) {
+        if (a.length) mixed.push(a.shift());
+        if (a.length) mixed.push(a.shift());
+        if (b.length) mixed.push(b.shift());
+      }
       return res.json({
         articles: mixed.slice(0, max),
-        updatedAt: new Date(reels.at).toISOString(),
-        feedsFailed: reels.failed,
+        updatedAt: new Date(Math.max(reels.at, ytReels.at)).toISOString(),
+        feedsFailed: [...reels.failed, ...ytReels.failed],
       });
     }
 
@@ -548,4 +670,5 @@ app.get('/', (req, res) => res.send('CIVIX server is running'));
 
 refresh();
 refreshReels();
+refreshYoutube();
 app.listen(process.env.PORT || 4000, '0.0.0.0', () => console.log('CIVIX server running'));
