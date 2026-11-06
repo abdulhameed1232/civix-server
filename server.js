@@ -5,8 +5,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-// Optional free YouTube Data API key (set it on Render as YT_API_KEY, not here)
-const YT_API_KEY = process.env.YT_API_KEY || '';
+// Free Pexels API key for Reels (set it on Render as PEXELS_API_KEY, never here)
+const PEXELS_API_KEY = process.env.PEXELS_API_KEY || '';
 
 const app = express();
 app.use(cors());
@@ -21,8 +21,6 @@ const parser = new Parser({
     item: [
       ['media:content', 'mediaContent', { keepArray: true }],
       ['media:thumbnail', 'mediaThumbnail', { keepArray: true }],
-      ['media:group', 'mediaGroup'],
-      ['yt:videoId', 'ytVideoId'],
     ],
   },
 });
@@ -30,14 +28,6 @@ const parser = new Parser({
 // name, url, language, country, category
 const f = (name, url, language, country, category = 'World') =>
   ({ name, url, language, country, category });
-
-// YouTube Shorts of a channel (vertical videos for Reels)
-const ytShort = (name, channelId, language, country) => ({
-  name: `${name} Shorts`,
-  url: `https://www.youtube.com/feeds/videos.xml?playlist_id=UUSH${channelId.slice(2)}`,
-  playlistId: `UUSH${channelId.slice(2)}`,
-  language, country, category: 'World', youtube: true, short: true,
-});
 
 const BBC = 'https://feeds.bbci.co.uk';
 const GU = 'https://www.theguardian.com';
@@ -65,7 +55,6 @@ const FEEDS = [
   f('Polygon', 'https://www.polygon.com/rss/index.xml', 'en', 'United States', 'Gaming'),
   f('PC Gamer', 'https://www.pcgamer.com/rss/', 'en', 'United Kingdom', 'Gaming'),
   f('BBC Sport', `${BBC}/sport/rss.xml`, 'en', 'World', 'Sports'),
-  f('ESPN', 'https://www.espn.com/espn/rss/news', 'en', 'United States', 'Sports'),
   f('BBC Science', `${BBC}/news/science_and_environment/rss.xml`, 'en', 'World', 'Science'),
   f('NASA', 'https://www.nasa.gov/feed/', 'en', 'United States', 'Science'),
   f('BBC Entertainment', `${BBC}/news/entertainment_and_arts/rss.xml`, 'en', 'World', 'Entertainment'),
@@ -104,27 +93,25 @@ const FEEDS = [
   f('France 24 Espanol', 'https://www.france24.com/es/rss', 'es', 'France'),
   f('France 24 Arabic', 'https://www.france24.com/ar/rss', 'ar', 'France'),
   f('NHK', 'https://www3.nhk.or.jp/rss/news/cat0.xml', 'ja', 'Japan'),
-
-  // ---------- Reels: YouTube Shorts ----------
-  ytShort('BBC News', 'UCCj956IF62FbT7Gouszaj9w', 'en', 'World'),
-  ytShort('Al Jazeera English', 'UCNye-wNBqNL5ZzHSJj3l8Bg', 'en', 'Qatar'),
-  ytShort('DW News', 'UCknLrEdhRCp1aegoMqRaCZg', 'en', 'Germany'),
-  ytShort('France 24 English', 'UCQfwfsi5VrQ8yKZ-UWmAEFg', 'en', 'France'),
-  ytShort('Sky News', 'UCoMdktPbSTixAyNGwb-UYkQ', 'en', 'United Kingdom'),
-  ytShort('euronews', 'UCSrZ3UV4jOidv8ppoVuvW9Q', 'en', 'World'),
-  ytShort('WION', 'UC_gUM8rL-Lrg6O3adPW9K1g', 'en', 'India'),
-  ytShort('NDTV', 'UCZFMm1mMw0F81Z37aaEzTUA', 'en', 'India'),
-  ytShort('India Today', 'UCYPvAwZP8pZhSMW8qs7cVCw', 'en', 'India'),
-  ytShort('Aaj Tak', 'UCt4t-jeY85JegMlZ-E5UWtA', 'hi', 'India'),
-  ytShort('ABP News', 'UCRWFSbif-RFENbBrSiez1DA', 'hi', 'India'),
-  ytShort('TRT World', 'UC7fWeaHhqgM4Ry-RMpZKQEA', 'en', 'World'),
-  ytShort('Al Jazeera Arabic', 'UCfiwzLy-8yKzIbsmZTzxDgw', 'ar', 'Qatar'),
-  ytShort('Dhruv Rathee', 'UC-CSyyi47VX1lD9zyeABW3w', 'hi', 'India'),
 ];
 
-const TTL = 10 * 60 * 1000;
+// ---------- Reels: vertical videos from Pexels (search word -> app topic) ----------
+const REEL_TOPICS = [
+  ['nature', 'Nature'], ['animals', 'Nature'], ['ocean', 'Nature'], ['mountains', 'Nature'],
+  ['travel', 'Travel'], ['city', 'Travel'],
+  ['food', 'Food'], ['cooking', 'Food'],
+  ['sports', 'Sports'], ['fitness', 'Sports'],
+  ['technology', 'Technology'], ['science', 'Science'],
+  ['music', 'Music'], ['dance', 'Music'],
+  ['fashion', 'Fashion'], ['art', 'Art'],
+  ['photography', 'Photography'], ['study', 'Education'],
+];
+
+const TTL = 10 * 60 * 1000;          // news: refresh every 10 minutes
+const REELS_TTL = 60 * 60 * 1000;    // reels: every hour (keeps Pexels free limits safe)
 const RETRY = 3 * 60 * 1000;
 const MAX_PER_FEED = 15;
+const REELS_PER_TOPIC = 15;
 const CACHE_FILE = path.join(__dirname, 'feed-cache.json');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -209,97 +196,22 @@ function toArticle(feed, item) {
     category: feed.category,
     imageUrl: image,
   };
-
-  if (feed.youtube) {
-    const id = item.ytVideoId || String(item.id || '').replace('yt:video:', '');
-    if (!id) return null;
-    article.id = md5('yt:' + id);
-    article.videoUrl = `https://www.youtube.com/embed/${id}`;
-    article.videoType = 'youtube';
-    article.isShort = !!feed.short;
-    article.imageUrl = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
-    const desc = item.mediaGroup && item.mediaGroup['media:description'];
-    if (desc && desc[0]) article.description = stripHtml(desc[0]).slice(0, 300);
-  } else if (video) {
+  if (video) {
     article.videoUrl = video;
     article.videoType = 'file';
   }
   return article.title ? article : null;
 }
 
-// ---- Keep only YouTube videos that are allowed to play inside other apps ----
-const embedCache = new Map();
-
-async function canEmbed(videoId) {
-  if (embedCache.has(videoId)) return embedCache.get(videoId);
-  try {
-    const res = await fetch(
-      'https://www.youtube.com/oembed?format=json&url=' +
-      encodeURIComponent('https://www.youtube.com/watch?v=' + videoId)
-    );
-    if (res.status === 200) {
-      embedCache.set(videoId, true);
-      return true;
-    }
-    if (res.status === 401 || res.status === 403 || res.status === 404) {
-      embedCache.set(videoId, false);
-      return false;
-    }
-    return true;
-  } catch (e) {
-    return true;
-  }
-}
-
-async function filterEmbeddable(articles) {
-  const checks = await runLimited(articles, 8, a =>
-    canEmbed(String(a.videoUrl).split('/embed/')[1])
-  );
-  return articles.filter((a, i) => (checks[i].status === 'fulfilled' ? checks[i].value : true));
-}
-
-async function fetchYoutubeApi(feed) {
-  const url =
-    'https://www.googleapis.com/youtube/v3/playlistItems?part=snippet' +
-    `&maxResults=${MAX_PER_FEED}&playlistId=${feed.playlistId}&key=${YT_API_KEY}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`YouTube API status ${res.status}`);
-  const data = await res.json();
-  return (data.items || [])
-    .map(it => {
-      const s = it.snippet || {};
-      const id = s.resourceId && s.resourceId.videoId;
-      if (!id || s.title === 'Private video' || s.title === 'Deleted video') return null;
-      return {
-        id: md5('yt:' + id),
-        title: stripHtml(s.title),
-        description: stripHtml(s.description).slice(0, 300),
-        link: `https://www.youtube.com/watch?v=${id}`,
-        publishedAt: new Date(s.publishedAt).toISOString(),
-        source: feed.name,
-        language: feed.language,
-        country: feed.country,
-        category: feed.category,
-        imageUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
-        videoUrl: `https://www.youtube.com/embed/${id}`,
-        videoType: 'youtube',
-        isShort: !!feed.short,
-      };
-    })
-    .filter(Boolean);
-}
-
 async function fetchFeed(feed) {
   let lastError;
-
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const data = await parser.parseURL(feed.url);
-      let articles = (data.items || [])
+      const articles = (data.items || [])
         .slice(0, MAX_PER_FEED)
         .map(item => toArticle(feed, item))
         .filter(Boolean);
-      if (feed.youtube) articles = await filterEmbeddable(articles);
       if (!articles.length) throw new Error('feed was empty');
       lastGood[feed.url] = articles;
       return { articles, stale: false };
@@ -308,22 +220,76 @@ async function fetchFeed(feed) {
       await sleep(800);
     }
   }
-
-  if (feed.youtube && YT_API_KEY) {
-    try {
-      const articles = await filterEmbeddable(await fetchYoutubeApi(feed));
-      if (articles.length) {
-        lastGood[feed.url] = articles;
-        return { articles, stale: false };
-      }
-    } catch (e) {
-      lastError = e;
-    }
-  }
-
   console.log(`  x ${feed.name}: ${lastError.message}`);
   if (lastGood[feed.url]) return { articles: lastGood[feed.url], stale: true };
   throw lastError;
+}
+
+// ---------- Pexels reels ----------
+
+// "https://www.pexels.com/video/a-dog-running-on-grass-123/" -> "A dog running on grass"
+function titleFromPexelsUrl(url) {
+  const slug = String(url || '').split('/video/')[1] || '';
+  const words = slug.replace(/\/$/, '').replace(/-\d+$/, '').replace(/-/g, ' ').trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : '';
+}
+
+// Choose an mp4 that is tall and not too heavy for phones (about 720p to 1080p)
+function pickVideoFile(files) {
+  const mp4 = (files || []).filter(
+    v => v.link && (v.file_type || '').includes('mp4') && v.height > v.width
+  );
+  if (!mp4.length) return null;
+  mp4.sort((a, b) => Math.abs(a.height - 1280) - Math.abs(b.height - 1280));
+  return mp4[0];
+}
+
+async function fetchPexelsTopic([query, category]) {
+  const page = 1 + Math.floor(Math.random() * 20); // different videos each refresh
+  const url =
+    'https://api.pexels.com/videos/search' +
+    `?query=${encodeURIComponent(query)}&orientation=portrait&size=medium` +
+    `&per_page=${REELS_PER_TOPIC}&page=${page}`;
+  const res = await fetch(url, { headers: { Authorization: PEXELS_API_KEY } });
+  if (!res.ok) throw new Error(`Pexels status ${res.status}`);
+  const data = await res.json();
+
+  return (data.videos || [])
+    .filter(v => v.duration > 0 && v.duration <= 60) // short clips only
+    .map(v => {
+      const file = pickVideoFile(v.video_files);
+      if (!file) return null;
+      const name = (v.user && v.user.name) || 'Pexels';
+      return {
+        id: md5('pexels:' + v.id),
+        title: titleFromPexelsUrl(v.url) || `${category} video`,
+        description: `Video by ${name} on Pexels`,
+        author: name,
+        link: v.url,
+        publishedAt: new Date().toISOString(),
+        source: 'Pexels',
+        language: 'any',   // no speech, so it fits every language
+        country: 'World',
+        category,
+        imageUrl: v.image,
+        videoUrl: file.link,
+        videoType: 'file',
+        isShort: true,
+        width: file.width,
+        height: file.height,
+        duration: v.duration,
+      };
+    })
+    .filter(Boolean);
+}
+
+function shuffle(list) {
+  const a = [...list];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
 async function runLimited(items, limit, fn) {
@@ -343,6 +309,7 @@ async function runLimited(items, limit, fn) {
   return results;
 }
 
+// ---------- News cache ----------
 let cache = { at: 0, articles: [], failed: [] };
 let refreshing = null;
 let timer = null;
@@ -369,9 +336,8 @@ function refresh() {
       .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
 
     cache = { at: Date.now(), articles, failed };
-    const shorts = articles.filter(a => a.isShort).length;
     console.log(
-      `Loaded ${articles.length} items (${shorts} shorts). ` +
+      `Loaded ${articles.length} news items. ` +
       `Failed: ${failed.join(', ') || 'none'}. ` +
       `Using saved copy: ${stale.join(', ') || 'none'}`
     );
@@ -386,40 +352,116 @@ function refresh() {
     .finally(() => {
       refreshing = null;
       clearTimeout(timer);
-      const shorts = cache.articles.filter(a => a.isShort).length;
-      timer = setTimeout(refresh, shorts === 0 ? RETRY : TTL);
+      timer = setTimeout(refresh, cache.articles.length ? TTL : RETRY);
     });
   return refreshing;
+}
+
+// ---------- Reels pool (keeps growing with fresh videos) ----------
+const REELS_EVERY = 10 * 60 * 1000;  // add fresh reels every 10 minutes
+const TOPICS_EACH_TIME = 3;          // 3 topics per round keeps Pexels free limits safe
+const POOL_MAX = 1500;               // keep the newest 1500 reels
+
+let reels = { at: 0, items: [], failed: [] };
+let reelsRefreshing = null;
+let reelsTimer = null;
+let topicTurn = 0;
+
+function refreshReels() {
+  if (reelsRefreshing) return reelsRefreshing;
+  reelsRefreshing = (async () => {
+    if (!PEXELS_API_KEY) {
+      console.log('No PEXELS_API_KEY set on Render, so Reels are empty');
+      return;
+    }
+    // First time: all topics. After that: a few topics each round, taking turns.
+    let topics;
+    if (!reels.items.length) topics = REEL_TOPICS;
+    else {
+      topics = [];
+      for (let k = 0; k < TOPICS_EACH_TIME; k++) {
+        topics.push(REEL_TOPICS[topicTurn % REEL_TOPICS.length]);
+        topicTurn++;
+      }
+    }
+
+    const results = await runLimited(topics, 4, fetchPexelsTopic);
+    const fresh = [];
+    const failed = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') fresh.push(...r.value);
+      else {
+        failed.push(topics[i][0]);
+        console.log(`  x reels "${topics[i][0]}": ${r.reason.message}`);
+      }
+    });
+
+    // New reels go first, old copies are removed, pool is capped
+    const seen = new Set();
+    const items = [...fresh, ...reels.items]
+      .filter(a => (seen.has(a.id) ? false : seen.add(a.id)))
+      .slice(0, POOL_MAX);
+    if (items.length) reels = { at: Date.now(), items, failed };
+    console.log(`Reels: +${fresh.length} new, ${items.length} in pool. Failed: ${failed.join(', ') || 'none'}`);
+  })()
+    .catch(e => console.error('Reels refresh error:', e))
+    .finally(() => {
+      reelsRefreshing = null;
+      clearTimeout(reelsTimer);
+      reelsTimer = setTimeout(refreshReels, reels.items.length ? REELS_EVERY : RETRY);
+    });
+  return reelsRefreshing;
 }
 
 // "en,hi" -> ['en', 'hi']
 const parts = v => String(v).toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
 
+function applyFilters(list, q) {
+  const { country, language, category } = q;
+  if (country) {
+    const set = parts(country);
+    list = list.filter(a => a.country === 'World' || set.includes(String(a.country).toLowerCase()));
+  }
+  if (language) {
+    const set = parts(language);
+    list = list.filter(a => a.language === 'any' || set.includes(String(a.language).toLowerCase()));
+  }
+  if (category) {
+    const set = parts(category);
+    list = list.filter(a => set.includes(String(a.category).toLowerCase()));
+  }
+  return list;
+}
+
 app.get('/api/news', async (req, res) => {
   try {
+    const { video, shorts, stories, limit } = req.query;
+    const max = Number(limit) || 300;
+
+    // Reels
+    if (shorts) {
+      if (!reels.items.length) await refreshReels();
+      // Newest 60 first (mixed), then the rest of the pool in random order,
+      // so every visit shows a different set
+      const list = applyFilters(reels.items, req.query);
+      const mixed = [...shuffle(list.slice(0, 60)), ...shuffle(list.slice(60))];
+      return res.json({
+        articles: mixed.slice(0, max),
+        updatedAt: new Date(reels.at).toISOString(),
+        feedsFailed: reels.failed,
+      });
+    }
+
+    // News
     if (!cache.articles.length) await refresh();
     else if (Date.now() - cache.at > TTL) refresh();
 
-    const { country, language, category, video, shorts, stories, limit } = req.query;
-    let list = cache.articles;
-    if (country) {
-      const set = parts(country);
-      list = list.filter(a => set.includes(String(a.country).toLowerCase()));
-    }
-    if (language) {
-      const set = parts(language);
-      list = list.filter(a => set.includes(String(a.language).toLowerCase()));
-    }
-    if (category) {
-      const set = parts(category);
-      list = list.filter(a => set.includes(String(a.category).toLowerCase()));
-    }
+    let list = applyFilters(cache.articles, req.query);
     if (video) list = list.filter(a => !!a.videoUrl);
-    if (shorts) list = list.filter(a => a.isShort);
     if (stories) list = list.filter(a => !a.videoUrl);
 
     res.json({
-      articles: list.slice(0, Number(limit) || 300),
+      articles: list.slice(0, max),
       updatedAt: new Date(cache.at).toISOString(),
       feedsFailed: cache.failed,
     });
@@ -429,7 +471,8 @@ app.get('/api/news', async (req, res) => {
   }
 });
 
-app.get('/', (req, res) => res.send('CIVIX news server is running'));
+app.get('/', (req, res) => res.send('CIVIX server is running'));
 
 refresh();
+refreshReels();
 app.listen(process.env.PORT || 4000, '0.0.0.0', () => console.log('CIVIX server running'));
