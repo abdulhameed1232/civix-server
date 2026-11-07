@@ -1707,10 +1707,60 @@ async function fillAvatars(people) {
 // Find any YouTube creator by name (costs 100 units, so results are kept for a day and capped)
 const channelSearchCache = new Map();
 let channelSearchDay = { day: '', count: 0 };
+// Free channel search: reads YouTube's public search page (no API quota)
+async function searchChannelsFree(q) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 12000);
+  try {
+    const r = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(q)}&sp=EgIQAg%253D%253D&hl=en`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en' },
+      signal: controller.signal,
+    });
+    if (!r.ok) throw new Error(`status ${r.status}`);
+    const html = await r.text();
+    const m = /var ytInitialData = (\{.*?\});<\/script>/s.exec(html);
+    if (!m) return [];
+    const data = JSON.parse(m[1]);
+    const found = [];
+    const walk = o => {
+      if (!o || typeof o !== 'object' || found.length >= 8) return;
+      if (o.channelRenderer && o.channelRenderer.channelId) {
+        found.push(o.channelRenderer);
+        return;
+      }
+      for (const k in o) walk(o[k]);
+    };
+    walk(data);
+    return found.map(c => {
+      const thumbs = (c.thumbnail && c.thumbnail.thumbnails) || [];
+      let pic = thumbs.length ? thumbs[thumbs.length - 1].url : undefined;
+      if (pic && pic.startsWith('//')) pic = `https:${pic}`;
+      if (pic) channelAvatars[c.channelId] = pic;
+      const name = (c.title && (c.title.simpleText || (c.title.runs || []).map(x => x.text).join(''))) || 'YouTube creator';
+      const desc = ((c.descriptionSnippet && c.descriptionSnippet.runs) || []).map(x => x.text).join('');
+      return {
+        id: key(name), name: stripHtml(name), kind: 'creator', category: 'Entertainment', language: 'any', country: 'World',
+        channelId: c.channelId, description: stripHtml(desc).slice(0, 140), imageUrl: pic, reels: 0, stories: 0,
+      };
+    });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function searchYoutubeChannels(q) {
-  if (!YT_API_KEY) return [];
   const hit = channelSearchCache.get(q);
   if (hit && Date.now() - hit.at < 24 * 3600 * 1000) return hit.list;
+  try {
+    const free = await searchChannelsFree(q);
+    if (free.length) {
+      channelSearchCache.set(q, { at: Date.now(), list: free });
+      return free;
+    }
+  } catch (e) {
+    console.log('Free channel search error:', e.message);
+  }
+  if (!YT_API_KEY) return [];
   const today = new Date().toISOString().slice(0, 10);
   if (channelSearchDay.day !== today) channelSearchDay = { day: today, count: 0 };
   if (channelSearchDay.count >= 25) return []; // keep YouTube's free daily limit safe
