@@ -855,6 +855,498 @@ function applyFilters(list, q) {
   return list;
 }
 
+// ============================================================
+// More content: Dailymotion, Vimeo, Bluesky, Mastodon, NASA, GIPHY, Unsplash
+// Each source is optional. If one fails, the others still work.
+// Keys (set on Render, never here): GIPHY_API_KEY, UNSPLASH_ACCESS_KEY, VIMEO_TOKEN
+// ============================================================
+const GIPHY_API_KEY = process.env.GIPHY_API_KEY || '';
+const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY || '';
+const VIMEO_TOKEN = process.env.VIMEO_TOKEN || '';
+const UA = { 'User-Agent': 'CIVIX/1.0 (social app)', Accept: 'application/json' };
+const MORE_CACHE_FILE = path.join(__dirname, 'more-cache.json');
+
+// Words that should never appear (extra safety on top of each site's own safe filter)
+const UNSAFE = /\b(nsfw|porn|xxx|nude|nudity|onlyfans|sex|sexy|18\+|gore|hentai|fetish|boobs|naked)\b/i;
+const safeText = s => !UNSAFE.test(String(s || ''));
+const BAD_LABELS = new Set(['porn', 'sexual', 'nudity', 'graphic-media', 'gore', 'nsfl', 'sexual-figurative', '!hide', '!warn']);
+
+const more = {
+  dailymotion: { at: 0, items: [] },
+  vimeo: { at: 0, items: [] },
+  bluesky: { at: 0, items: [], photos: [] },
+  mastodon: { at: 0, items: [], photos: [] },
+  nasa: { at: 0, items: [] },
+  giphy: { at: 0, items: [] },
+  unsplash: { at: 0, photos: [] },
+};
+try {
+  const saved = JSON.parse(fs.readFileSync(MORE_CACHE_FILE, 'utf8'));
+  for (const k of Object.keys(more)) if (saved[k]) more[k] = { ...more[k], ...saved[k] };
+} catch (e) { }
+let moreSaveTimer = null;
+function saveMore() {
+  clearTimeout(moreSaveTimer);
+  moreSaveTimer = setTimeout(() => {
+    try { fs.writeFileSync(MORE_CACHE_FILE, JSON.stringify(more)); } catch (e) { }
+  }, 2000);
+}
+
+async function getJson(url, headers = {}) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 20000);
+  try {
+    const r = await fetch(url, { headers: { ...UA, ...headers }, signal: controller.signal });
+    if (!r.ok) throw new Error(`status ${r.status}`);
+    return await r.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+const plain = s => stripHtml(String(s || '')).replace(/\s+/g, ' ').trim();
+const firstLine = (s, n = 140) => {
+  const t = plain(s);
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+};
+
+// ---------- Dailymotion (public API, no key) ----------
+const DM_CHANNEL_TOPIC = {
+  news: 'World', sport: 'Sports', music: 'Music', fun: 'Entertainment', videogames: 'Gaming', tech: 'Technology',
+  travel: 'Travel', lifestyle: 'Fashion', auto: 'Technology', animals: 'Nature', shortfilms: 'Movies',
+  tv: 'Entertainment', school: 'Education', creation: 'Art', people: 'Entertainment', webcam: 'Nature',
+};
+const DM_LANG = { en: 'en', hi: 'hi', fr: 'fr', es: 'es', de: 'de', pt: 'pt', ar: 'ar', tr: 'tr', ru: 'ru', it: 'en', ja: 'ja', zh: 'zh', id: 'id' };
+const DM_CHANNELS = ['fun', 'sport', 'music', 'videogames', 'tech', 'travel', 'animals', 'shortfilms', 'lifestyle', 'news', 'auto', 'creation'];
+async function refreshDailymotion() {
+  const all = [];
+  const fields = 'id,title,duration,thumbnail_720_url,owner.screenname,created_time,language,channel,explicit,allow_embed';
+  const results = await runLimited(DM_CHANNELS, 3, async ch => {
+    const data = await getJson(
+      `https://api.dailymotion.com/videos?fields=${fields}&channel=${ch}&sort=trending&limit=40&family_filter=true&shorter_than=4`
+    );
+    return (data.list || []).filter(v => v && v.id && !v.explicit && v.allow_embed !== false && safeText(v.title) && (!v.duration || v.duration <= 240));
+  });
+  (results || []).forEach(r => {
+    if (!r || r.status !== 'fulfilled') return;
+    for (const v of r.value) {
+      all.push({
+        id: `dm-${v.id}`,
+        title: firstLine(v.title),
+        description: '',
+        link: `https://www.dailymotion.com/video/${v.id}`,
+        publishedAt: new Date((v.created_time || 0) * 1000 || Date.now()).toISOString(),
+        source: v['owner.screenname'] || 'Dailymotion',
+        language: DM_LANG[v.language] || 'any',
+        country: 'World',
+        category: DM_CHANNEL_TOPIC[v.channel] || 'Entertainment',
+        imageUrl: v.thumbnail_720_url,
+        videoUrl: `https://www.dailymotion.com/embed/video/${v.id}`,
+        videoType: 'embed',
+        provider: 'dailymotion',
+        isShort: true,
+        kind: v.channel === 'news' ? 'news' : 'creator',
+      });
+    }
+  });
+  if (all.length) {
+    more.dailymotion = { at: Date.now(), items: all };
+    saveMore();
+  }
+  console.log(`Dailymotion: ${all.length} videos`);
+}
+
+// ---------- Vimeo (needs VIMEO_TOKEN) ----------
+async function refreshVimeo() {
+  if (!VIMEO_TOKEN) return;
+  const headers = { Authorization: `bearer ${VIMEO_TOKEN}`, Accept: 'application/vnd.vimeo.*+json;version=3.4' };
+  const fields = 'uri,name,duration,created_time,pictures.sizes,user.name,link,content_rating,privacy.embed';
+  const all = [];
+  for (const page of [1, 2]) {
+    try {
+      const data = await getJson(`https://api.vimeo.com/channels/staffpicks/videos?per_page=50&page=${page}&sort=date&fields=${fields}`, headers);
+      for (const v of data.data || []) {
+        const id = String(v.uri || '').split('/').pop();
+        const ratings = v.content_rating || [];
+        if (!id || (v.duration && v.duration > 300)) continue;
+        if (ratings.length && !ratings.includes('safe')) continue;
+        if (v.privacy && v.privacy.embed && v.privacy.embed !== 'public') continue;
+        if (!safeText(v.name)) continue;
+        const sizes = (v.pictures && v.pictures.sizes) || [];
+        const pic = sizes.length ? sizes[Math.min(sizes.length - 1, 4)].link : undefined;
+        all.push({
+          id: `vimeo-${id}`,
+          title: firstLine(v.name),
+          description: '',
+          link: v.link || `https://vimeo.com/${id}`,
+          publishedAt: v.created_time || new Date().toISOString(),
+          source: (v.user && v.user.name) || 'Vimeo',
+          language: 'any',
+          country: 'World',
+          category: 'Movies',
+          imageUrl: pic,
+          videoUrl: `https://player.vimeo.com/video/${id}`,
+          videoType: 'embed',
+          provider: 'vimeo',
+          isShort: true,
+          kind: 'creator',
+        });
+      }
+    } catch (e) {
+      console.log('Vimeo error:', e.message);
+      break;
+    }
+  }
+  if (all.length) {
+    more.vimeo = { at: Date.now(), items: all };
+    saveMore();
+  }
+  console.log(`Vimeo: ${all.length} videos`);
+}
+
+// ---------- Bluesky (public, no key) ----------
+const BSKY_FEEDS = [
+  'at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/whats-hot',
+];
+function bskyHasBadLabels(post) {
+  const labels = [...(post.labels || []), ...((post.author && post.author.labels) || [])];
+  return labels.some(l => BAD_LABELS.has(String(l.val || '').toLowerCase()));
+}
+async function refreshBluesky() {
+  const videos = [];
+  const photos = [];
+  for (const feed of BSKY_FEEDS) {
+    let cursor = '';
+    for (let page = 0; page < 4; page++) {
+      let data;
+      try {
+        data = await getJson(
+          `https://public.api.bsky.app/xrpc/app.bsky.feed.getFeed?feed=${encodeURIComponent(feed)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+        );
+      } catch (e) {
+        console.log('Bluesky error:', e.message);
+        break;
+      }
+      for (const item of data.feed || []) {
+        const post = item.post || {};
+        if (!post.uri || bskyHasBadLabels(post)) continue;
+        const text = (post.record && post.record.text) || '';
+        if (!safeText(text)) continue;
+        let embed = post.embed || {};
+        if (embed.$type === 'app.bsky.embed.recordWithMedia#view') embed = embed.media || {};
+        const handle = (post.author && post.author.handle) || 'bluesky';
+        const name = (post.author && (post.author.displayName || post.author.handle)) || 'Bluesky';
+        const rkey = String(post.uri).split('/').pop();
+        const langs = (post.record && post.record.langs) || [];
+        const base = {
+          title: firstLine(text) || name,
+          description: '',
+          link: `https://bsky.app/profile/${handle}/post/${rkey}`,
+          publishedAt: (post.record && post.record.createdAt) || post.indexedAt || new Date().toISOString(),
+          source: name,
+          author: `@${handle}`,
+          authorAvatar: post.author && post.author.avatar,
+          language: langs[0] ? String(langs[0]).slice(0, 2) : 'any',
+          country: 'World',
+          category: 'Entertainment',
+          provider: 'bluesky',
+          likes: post.likeCount || 0,
+        };
+        if (embed.$type === 'app.bsky.embed.video#view' && embed.playlist) {
+          videos.push({ ...base, id: `bsky-${rkey}`, imageUrl: embed.thumbnail, videoUrl: embed.playlist, videoType: 'file', isShort: true, kind: 'creator' });
+        } else if (embed.$type === 'app.bsky.embed.images#view' && embed.images && embed.images.length) {
+          const img = embed.images[0];
+          photos.push({ ...base, id: `bsky-${rkey}`, type: 'photo', imageUrl: img.fullsize || img.thumb, thumbUrl: img.thumb, credit: `${name} on Bluesky` });
+        }
+      }
+      cursor = data.cursor;
+      if (!cursor) break;
+    }
+  }
+  if (videos.length || photos.length) {
+    more.bluesky = { at: Date.now(), items: videos.slice(0, 300), photos: photos.slice(0, 300) };
+    saveMore();
+  }
+  console.log(`Bluesky: ${videos.length} videos, ${photos.length} photos`);
+}
+
+// ---------- Mastodon (public trending posts, no key) ----------
+const MASTODON_SERVERS = ['mastodon.social', 'mas.to', 'mastodon.online'];
+async function refreshMastodon() {
+  const videos = [];
+  const photos = [];
+  const seen = new Set();
+  for (const host of MASTODON_SERVERS) {
+    for (const offset of [0, 40]) {
+      let list;
+      try {
+        list = await getJson(`https://${host}/api/v1/trends/statuses?limit=40&offset=${offset}`);
+      } catch (e) {
+        console.log(`Mastodon ${host} error:`, e.message);
+        break;
+      }
+      for (const st of list || []) {
+        if (!st || st.sensitive || st.spoiler_text || !st.media_attachments || !st.media_attachments.length) continue;
+        if (seen.has(st.url)) continue;
+        seen.add(st.url);
+        const text = plain(st.content);
+        if (!safeText(text)) continue;
+        const acct = (st.account && st.account.acct) || 'mastodon';
+        const name = (st.account && (st.account.display_name || st.account.username)) || 'Mastodon';
+        const base = {
+          title: firstLine(text) || name,
+          description: '',
+          link: st.url,
+          publishedAt: st.created_at,
+          source: name,
+          author: `@${acct}`,
+          authorAvatar: st.account && st.account.avatar,
+          language: st.language ? String(st.language).slice(0, 2) : 'any',
+          country: 'World',
+          category: 'Entertainment',
+          provider: 'mastodon',
+          likes: st.favourites_count || 0,
+        };
+        const m = st.media_attachments[0];
+        if ((m.type === 'video' || m.type === 'gifv') && m.url) {
+          videos.push({ ...base, id: `masto-${st.id}`, imageUrl: m.preview_url, videoUrl: m.url, videoType: 'file', isShort: true, kind: 'creator' });
+        } else if (m.type === 'image' && m.url) {
+          photos.push({ ...base, id: `masto-${st.id}`, type: 'photo', imageUrl: m.url, thumbUrl: m.preview_url, credit: `${name} on Mastodon` });
+        }
+      }
+    }
+  }
+  if (videos.length || photos.length) {
+    more.mastodon = { at: Date.now(), items: videos, photos };
+    saveMore();
+  }
+  console.log(`Mastodon: ${videos.length} videos, ${photos.length} photos`);
+}
+
+// ---------- NASA (public, no key) ----------
+const NASA_TOPICS = ['earth from space', 'mars rover', 'rocket launch', 'astronaut', 'galaxy', 'moon', 'space station', 'solar eclipse'];
+async function refreshNasa() {
+  const all = [];
+  const topics = shuffle(NASA_TOPICS).slice(0, 4);
+  for (const q of topics) {
+    try {
+      const data = await getJson(`https://images-api.nasa.gov/search?media_type=video&page_size=12&q=${encodeURIComponent(q)}`);
+      const items = ((data.collection && data.collection.items) || []).slice(0, 8);
+      const done = await runLimited(items, 3, async it => {
+        const d = (it.data && it.data[0]) || {};
+        const files = await getJson(it.href);
+        const mp4s = (Array.isArray(files) ? files : []).filter(u => /\.mp4$/i.test(u));
+        const pick = mp4s.find(u => /~mobile\.mp4$/i.test(u)) || mp4s.find(u => /~small\.mp4$/i.test(u)) || mp4s.find(u => /~medium\.mp4$/i.test(u)) || mp4s[0];
+        if (!pick) return null;
+        return {
+          id: `nasa-${d.nasa_id}`,
+          title: firstLine(d.title),
+          description: firstLine(d.description, 200),
+          link: `https://images.nasa.gov/details/${encodeURIComponent(d.nasa_id)}`,
+          publishedAt: d.date_created || new Date().toISOString(),
+          source: 'NASA',
+          language: 'en',
+          country: 'World',
+          category: 'Science',
+          imageUrl: it.links && it.links[0] && it.links[0].href,
+          videoUrl: pick.replace(/^http:/, 'https:').replace(/ /g, '%20'),
+          videoType: 'file',
+          provider: 'nasa',
+          isShort: true,
+          kind: 'creator',
+        };
+      });
+      (done || []).forEach(r => r && r.status === 'fulfilled' && r.value && all.push(r.value));
+    } catch (e) {
+      console.log('NASA error:', e.message);
+    }
+  }
+  if (all.length) {
+    const have = new Set(all.map(a => a.id));
+    more.nasa = { at: Date.now(), items: [...all, ...more.nasa.items.filter(a => !have.has(a.id))].slice(0, 120) };
+    saveMore();
+  }
+  console.log(`NASA: ${all.length} videos`);
+}
+
+// ---------- GIPHY (needs GIPHY_API_KEY) ----------
+async function refreshGiphy() {
+  if (!GIPHY_API_KEY) return;
+  try {
+    const data = await getJson(`https://api.giphy.com/v1/gifs/trending?api_key=${GIPHY_API_KEY}&limit=50&rating=pg`);
+    const all = (data.data || [])
+      .filter(g => g.images && (g.images.original_mp4 || g.images.fixed_height) && safeText(g.title))
+      .map(g => ({
+        id: `giphy-${g.id}`,
+        title: firstLine(g.title || 'GIF'),
+        description: '',
+        link: g.url,
+        publishedAt: g.trending_datetime && !String(g.trending_datetime).startsWith('0000') ? new Date(g.trending_datetime + 'Z').toISOString() : new Date().toISOString(),
+        source: g.username || 'GIPHY',
+        language: 'any',
+        country: 'World',
+        category: 'Entertainment',
+        imageUrl: g.images.original_still && g.images.original_still.url,
+        videoUrl: (g.images.original_mp4 && g.images.original_mp4.mp4) || g.images.fixed_height.mp4,
+        videoType: 'file',
+        provider: 'giphy',
+        isShort: true,
+        kind: 'creator',
+      }));
+    if (all.length) {
+      more.giphy = { at: Date.now(), items: all };
+      saveMore();
+    }
+    console.log(`GIPHY: ${all.length} clips`);
+  } catch (e) {
+    console.log('GIPHY error:', e.message);
+  }
+}
+
+// GIF search for stories and chats (the key stays on the server)
+const gifSearchCache = new Map();
+app.get('/api/gifs', async (req, res) => {
+  try {
+    if (!GIPHY_API_KEY) return res.json({ gifs: [] });
+    const q = String(req.query.q || '').trim().slice(0, 50);
+    const type = req.query.type === 'stickers' ? 'stickers' : 'gifs';
+    const k = `${type}:${q}`;
+    const hit = gifSearchCache.get(k);
+    if (hit && Date.now() - hit.at < 30 * 60 * 1000) return res.json({ gifs: hit.list });
+    const url = q
+      ? `https://api.giphy.com/v1/${type}/search?api_key=${GIPHY_API_KEY}&limit=30&rating=pg&q=${encodeURIComponent(q)}`
+      : `https://api.giphy.com/v1/${type}/trending?api_key=${GIPHY_API_KEY}&limit=30&rating=pg`;
+    const data = await getJson(url);
+    const list = (data.data || []).map(g => ({
+      id: g.id,
+      title: g.title,
+      preview: (g.images.fixed_width_small && g.images.fixed_width_small.url) || (g.images.fixed_width && g.images.fixed_width.url),
+      url: (g.images.fixed_width && g.images.fixed_width.url) || g.images.original.url,
+      mp4: g.images.fixed_width && g.images.fixed_width.mp4,
+      width: Number((g.images.fixed_width && g.images.fixed_width.width) || 200),
+      height: Number((g.images.fixed_width && g.images.fixed_width.height) || 200),
+    }));
+    gifSearchCache.set(k, { at: Date.now(), list });
+    if (gifSearchCache.size > 300) gifSearchCache.delete(gifSearchCache.keys().next().value);
+    res.json({ gifs: list });
+  } catch (e) {
+    res.json({ gifs: [] });
+  }
+});
+
+// ---------- Unsplash (needs UNSPLASH_ACCESS_KEY) ----------
+const UNSPLASH_TOPICS = [
+  ['travel', 'Travel'], ['nature', 'Nature'], ['food-drink', 'Food'], ['architecture-interior', 'Art'],
+  ['fashion-beauty', 'Fashion'], ['animals', 'Nature'], ['street-photography', 'Photography'], ['sports', 'Sports'],
+];
+async function refreshUnsplash() {
+  if (!UNSPLASH_ACCESS_KEY) return;
+  const headers = { Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}`, 'Accept-Version': 'v1' };
+  const all = [];
+  // 8 requests every 6 hours (the free plan allows 50 per hour)
+  const results = await runLimited(UNSPLASH_TOPICS, 2, async ([slug, category]) => {
+    const page = 1 + Math.floor(Math.random() * 3);
+    const list = await getJson(`https://api.unsplash.com/topics/${slug}/photos?per_page=30&page=${page}&order_by=popular`, headers);
+    return (Array.isArray(list) ? list : []).map(p => ({ p, category }));
+  });
+  (results || []).forEach(r => {
+    if (!r || r.status !== 'fulfilled') return;
+    for (const { p, category } of r.value) {
+      const name = (p.user && p.user.name) || 'Unsplash';
+      const ref = '?utm_source=civix&utm_medium=referral';
+      all.push({
+        id: `unsplash-${p.id}`,
+        type: 'photo',
+        title: firstLine(p.description || p.alt_description || `${category} photo`),
+        description: '',
+        link: `${(p.links && p.links.html) || 'https://unsplash.com'}${ref}`,
+        publishedAt: p.created_at || new Date().toISOString(),
+        source: name,
+        author: p.user && p.user.username ? `@${p.user.username}` : undefined,
+        authorAvatar: p.user && p.user.profile_image && p.user.profile_image.medium,
+        language: 'any',
+        country: 'World',
+        category,
+        imageUrl: p.urls && p.urls.regular,
+        thumbUrl: p.urls && p.urls.small,
+        color: p.color,
+        credit: `Photo by ${name} on Unsplash`,
+        creditLink: `${(p.user && p.user.links && p.user.links.html) || 'https://unsplash.com'}${ref}`,
+        provider: 'unsplash',
+        likes: p.likes || 0,
+      });
+    }
+  });
+  if (all.length) {
+    more.unsplash = { at: Date.now(), photos: all };
+    saveMore();
+  }
+  console.log(`Unsplash: ${all.length} photos`);
+}
+
+// ---------- Refresh schedule ----------
+function every(fn, ms, firstDelay) {
+  const run = () => fn().catch(e => console.log(`${fn.name} error:`, e.message));
+  setTimeout(() => {
+    run();
+    setInterval(run, ms);
+  }, firstDelay);
+}
+const MIN = 60 * 1000;
+function startMoreSources() {
+  every(refreshBluesky, 30 * MIN, 5 * 1000);
+  every(refreshMastodon, 30 * MIN, 8 * 1000);
+  every(refreshDailymotion, 60 * MIN, 12 * 1000);
+  every(refreshGiphy, 2 * 60 * MIN, 15 * 1000);
+  every(refreshVimeo, 6 * 60 * MIN, 20 * 1000);
+  every(refreshUnsplash, 6 * 60 * MIN, 25 * 1000);
+  every(refreshNasa, 12 * 60 * MIN, 30 * 1000);
+}
+
+// Take one from each site in turn, so Reels never shows 5 from the same site in a row
+function mixBySource(list) {
+  const groups = {};
+  for (const it of shuffle(list)) (groups[it.provider || it.source] = groups[it.provider || it.source] || []).push(it);
+  const lists = Object.values(groups);
+  const out = [];
+  while (lists.some(l => l.length)) for (const l of lists) if (l.length) out.push(l.shift());
+  return out;
+}
+
+// All extra videos, mixed (used by Reels)
+function moreVideos() {
+  return [
+    ...more.dailymotion.items,
+    ...more.vimeo.items,
+    ...more.bluesky.items,
+    ...more.mastodon.items,
+    ...more.nasa.items,
+  ];
+}
+
+// Photos and posts for Home "Discover" and the Explore grid
+app.get('/api/discover', (req, res) => {
+  const max = Math.min(Number(req.query.limit) || 60, 200);
+  let photos = [...more.unsplash.photos, ...more.bluesky.photos, ...more.mastodon.photos];
+  const topic = String(req.query.category || '');
+  if (topic) photos = photos.filter(p => p.category === topic);
+  if (req.query.language) {
+    const set = parts(req.query.language);
+    photos = photos.filter(p => p.language === 'any' || set.includes(p.language));
+  }
+  // Mix the sources so it is not all from one site
+  const bySource = {};
+  for (const p of shuffle(photos)) (bySource[p.provider] = bySource[p.provider] || []).push(p);
+  const lists = Object.values(bySource);
+  const out = [];
+  while (out.length < max && lists.some(l => l.length)) for (const l of lists) if (l.length) out.push(l.shift());
+  res.json({
+    items: out.slice(0, max),
+    gifs: shuffle(more.giphy.items).slice(0, 12),
+    updatedAt: new Date(Math.max(more.unsplash.at, more.bluesky.at, more.mastodon.at)).toISOString(),
+  });
+});
+
 app.get('/api/news', async (req, res) => {
   try {
     const { video, shorts, stories, limit } = req.query;
@@ -872,6 +1364,9 @@ app.get('/api/news', async (req, res) => {
       wanted.forEach(ensureLanguage);
       const langItems = wanted.flatMap(code => (langShorts[code] ? langShorts[code].items : []));
       const creators = shuffle(applyFilters([...ytCreators.items, ...ytSearch.items, ...langItems], req.query));
+      // Dailymotion, Vimeo, Bluesky, Mastodon, NASA (+ a few GIPHY loops)
+      const extra = mixBySource(applyFilters(moreVideos(), req.query));
+      const loops = shuffle(more.giphy.items);
       // Mix like Instagram: mostly creators, news is about 1 in 5, plus some stock clips
       const mixed = [];
       const seenIds = new Set();
@@ -881,12 +1376,15 @@ app.get('/api/news', async (req, res) => {
           if (!seenIds.has(x.id)) { seenIds.add(x.id); mixed.push(x); return; }
         }
       };
-      while (stock.length || news.length || creators.length) {
+      let round = 0;
+      while (stock.length || news.length || creators.length || extra.length) {
         take(creators);
-        take(creators);
+        take(extra);
         take(news);
         take(creators);
+        take(extra);
         take(stock);
+        if (round++ % 3 === 2) take(loops);
       }
       return res.json({
         articles: mixed.slice(0, max),
@@ -1240,4 +1738,5 @@ refreshReels();
 refreshYoutube();
 refreshYoutubeSearch();
 refreshCreators();
+startMoreSources();
 app.listen(process.env.PORT || 4000, '0.0.0.0', () => console.log('CIVIX server running'));
