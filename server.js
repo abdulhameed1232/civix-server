@@ -1511,10 +1511,13 @@ function mixBySource(list) {
 }
 
 // All extra videos, mixed (used by Reels)
+// Dailymotion / Vimeo players show "Forbidden" inside the app, so they are off for now.
+// (Set EMBED_REELS=on on Render to turn them back on for testing.)
+const EMBED_REELS = process.env.EMBED_REELS === 'on';
 function moreVideos() {
   return [
-    ...more.dailymotion.items,
-    ...more.vimeo.items,
+    ...(EMBED_REELS ? more.dailymotion.items : []),
+    ...(EMBED_REELS ? more.vimeo.items : []),
     ...more.bluesky.items,
     ...more.mastodon.items,
     ...more.nasa.items,
