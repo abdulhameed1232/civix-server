@@ -2001,6 +2001,48 @@ app.post('/api/notify', async (req, res) => {
   }
 });
 
+// ---------- Reset password page (the link in the "Reset your password" email opens this) ----------
+const RESET_PAGE = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CIVIX · New password</title>
+<style>
+body{margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;justify-content:center}
+main{width:100%;max-width:420px;padding:40px 20px}
+h1{font-size:26px;margin:0 0 6px}.logo{font-weight:900;font-size:30px;letter-spacing:2px;margin-bottom:24px}.logo b{color:#FF2D78}
+p{color:#aaa;line-height:1.5}input{width:100%;box-sizing:border-box;background:#121212;border:1px solid #333;border-radius:12px;color:#fff;font-size:16px;padding:14px;margin:8px 0}
+button{width:100%;border:0;border-radius:14px;padding:15px;font-size:16px;font-weight:800;color:#fff;background:linear-gradient(45deg,#FF8A00,#FF2D78 55%,#7B2FF7);margin-top:12px}
+ul{list-style:none;padding:0;margin:6px 0;color:#8E8E93;font-size:14px}li.ok{color:#34D399}.msg{margin-top:16px;font-weight:700}.err{color:#FF453A}.good{color:#34D399}
+</style></head><body><main>
+<div class="logo">CIVIX<b>.</b></div>
+<div id="box"><h1>Choose a new password</h1><p>Type your new password two times.</p>
+<input id="p1" type="password" placeholder="New password" autocomplete="new-password">
+<input id="p2" type="password" placeholder="Type it again" autocomplete="new-password">
+<ul id="rules"></ul><button id="go">Save new password</button></div>
+<div id="msg" class="msg"></div>
+</main><script>
+var URL_='${SUPABASE_URL}',KEY='${SUPABASE_KEY}';
+var h=new URLSearchParams(location.hash.slice(1)),q=new URLSearchParams(location.search);
+var token=h.get('access_token');var msg=document.getElementById('msg'),box=document.getElementById('box');
+var R=[['At least 8 characters',function(p){return p.length>=8}],['A capital letter (A–Z)',function(p){return /[A-Z]/.test(p)}],['A small letter (a–z)',function(p){return /[a-z]/.test(p)}],['A number (0–9)',function(p){return /[0-9]/.test(p)}],['A symbol, like ! @ # $ %',function(p){return /[^A-Za-z0-9]/.test(p)}]];
+function draw(){var p=document.getElementById('p1').value;document.getElementById('rules').innerHTML=R.map(function(r){return '<li class="'+(r[1](p)?'ok':'')+'">'+(r[1](p)?'✓ ':'○ ')+r[0]+'</li>'}).join('')}
+document.getElementById('p1').oninput=draw;draw();
+if(!token){box.style.display='none';msg.className='msg err';msg.textContent=(h.get('error_description')||q.get('error_description')||'This link is not valid or has expired.')+' Open CIVIX and tap "Forgot password?" again to get a new email.';}
+history.replaceState(null,'',location.pathname);
+document.getElementById('go').onclick=function(){var a=document.getElementById('p1').value,b=document.getElementById('p2').value;
+if(!R.every(function(r){return r[1](a)})){msg.className='msg err';msg.textContent='Make the password stronger (see the list).';return}
+if(a!==b){msg.className='msg err';msg.textContent='The two passwords are not the same.';return}
+msg.className='msg';msg.textContent='Saving…';
+fetch(URL_+'/auth/v1/user',{method:'PUT',headers:{apikey:KEY,Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({password:a})})
+.then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})})
+.then(function(x){if(x.ok){box.style.display='none';msg.className='msg good';msg.textContent='✓ Password changed. Open CIVIX and sign in with your new password.';}
+else{msg.className='msg err';msg.textContent=(x.j&&(x.j.msg||x.j.message||x.j.error_description))||'Could not save. The link may have expired.';}})
+.catch(function(){msg.className='msg err';msg.textContent='No internet? Please try again.'});};
+</script></body></html>`;
+app.get('/reset', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.type('html').send(RESET_PAGE);
+});
+
 app.get('/', (req, res) => res.send('CIVIX server is running'));
 
 refresh();
