@@ -132,7 +132,6 @@ const YT_CHANNELS = [
   ['WION', 'UC_gUM8rL-Lrg6O3adPW9K1g', 'en', 'India', 'World'],
   ['NDTV', 'UCZFMm1mMw0F81Z37aaEzTUA', 'en', 'India', 'World'],
   ['India Today', 'UCYPvAwZP8pZhSMW8qs7cVCw', 'en', 'India', 'World'],
-  ['TRT World', 'UC7fWeaHhqgM4Ry-RMpZKQEA', 'en', 'World', 'World'],
   ['Aaj Tak', 'UCt4t-jeY85JegMlZ-E5UWtA', 'hi', 'India', 'World'],
   ['ABP News', 'UCRWFSbif-RFENbBrSiez1DA', 'hi', 'India', 'World'],
   ['Dhruv Rathee', 'UC-CSyyi47VX1lD9zyeABW3w', 'hi', 'India', 'Education'],
@@ -157,7 +156,6 @@ const CREATOR_CHANNELS = [
   ['5-Minute Crafts', 'UC295-Dw_tDNtZXFeAPAW6Aw', 'en', 'World', 'Art'],
   ['Nas Daily', 'UCJsUvAqDzczYv2UpFmu4PcA', 'en', 'World', 'Travel'],
   ['BBC Earth', 'UCwmZiChSryoWQCZMIQezgTg', 'en', 'World', 'Nature'],
-  ['PewDiePie', 'UC-lHJZR3Gqxm24_Vd_AJ5Yw', 'en', 'World', 'Gaming'],
   ['IGN', 'UCKy1dAqELo0zrOtPkf0eTMw', 'en', 'United States', 'Gaming'],
   ['NBA', 'UCWJ2lWNubArHWmf3FIHbfcQ', 'en', 'United States', 'Sports'],
   ['FIFA', 'UCpcTrCXblq78GZrTUTLWeBw', 'en', 'World', 'Sports'],
@@ -521,14 +519,210 @@ async function toYoutubeReels(items, info) {
     }));
 }
 
+// ============================================================
+// Famous creators (tech, vlogs, comedy, gaming, food, fitness, education…)
+// Only the @handle is needed: the server finds the channel by itself (no YouTube quota used).
+// [name, @handle, language, country, topic, extra search words]
+// ============================================================
+const FAMOUS_CREATORS = [
+  // India: vlogs, comedy, tech, education
+  ['Sourav Joshi Vlogs', 'souravjoshivlogs7028', 'hi', 'India', 'Travel', 'sourav joshi soro joshi vlog'],
+  ['Flying Beast', 'flyingbeast320', 'hi', 'India', 'Travel', 'gaurav taneja'],
+  ['Dhruv Rathee', 'dhruvrathee', 'hi', 'India', 'Education', 'dhruv'],
+  ['Ashish Chanchlani Vines', 'ashishchanchlanivines', 'hi', 'India', 'Entertainment', 'ashish chanchlani'],
+  ['Triggered Insaan', 'triggeredinsaan', 'hi', 'India', 'Entertainment', 'nischay malhan'],
+  ['Fukra Insaan', 'fukrainsaan', 'hi', 'India', 'Entertainment', 'abhishek malhan'],
+  ['Elvish Yadav Vlogs', 'elvishyadavvlogs', 'hi', 'India', 'Entertainment', 'elvish'],
+  ['Tech Burner', 'techburner', 'hi', 'India', 'Technology', 'shlok'],
+  ['Trakin Tech', 'trakintech', 'hi', 'India', 'Technology', 'arun prabhudesai'],
+  ['Beebom', 'beebomco', 'en', 'India', 'Technology', ''],
+  ['Mumbiker Nikhil', 'mumbikernikhil', 'hi', 'India', 'Travel', 'nikhil sharma'],
+  ['Harsh Beniwal', 'harshbeniwal', 'hi', 'India', 'Entertainment', ''],
+  ['Round2hell', 'round2hell', 'hi', 'India', 'Entertainment', 'r2h'],
+  ['Amit Bhadana', 'amitbhadana', 'hi', 'India', 'Entertainment', ''],
+  ['BeerBiceps', 'beerbiceps', 'hi', 'India', 'Education', 'ranveer allahbadia trs'],
+  ['Samay Raina', 'samayrainaofficial', 'hi', 'India', 'Entertainment', 'samay'],
+  ['Ankur Warikoo', 'warikoo', 'en', 'India', 'Business', 'warikoo'],
+  ['Raj Shamani', 'rajshamani', 'hi', 'India', 'Business', 'figuring out'],
+  ['Physics Wallah', 'physicswallah', 'hi', 'India', 'Education', 'alakh pandey pw'],
+  ['Techno Gamerz', 'technogamerzofficial', 'hi', 'India', 'Gaming', 'ujjwal'],
+  ['Total Gaming', 'totalgaming093', 'hi', 'India', 'Gaming', 'ajjubhai'],
+  ['MYTHPAT', 'mythpat', 'hi', 'India', 'Gaming', 'mithilesh'],
+  ['Mostly Sane', 'mostlysane', 'hi', 'India', 'Entertainment', 'prajakta koli'],
+  ['Ranveer Brar', 'ranveerbrar', 'hi', 'India', 'Food', 'chef'],
+  ['Kabita\'s Kitchen', 'kabitaskitchen', 'hi', 'India', 'Food', 'kabita'],
+  ['Tanmay Bhat', 'tanmaybhat', 'hi', 'India', 'Entertainment', ''],
+  ['Nitish Rajput', 'nitishrajput', 'hi', 'India', 'Education', ''],
+  ['Mr. Indian Hacker', 'mrindianhacker', 'hi', 'India', 'Science', 'dilraj'],
+  ['Crazy XYZ', 'crazyxyz', 'hi', 'India', 'Science', 'amit sharma'],
+  ['Sandeep Maheshwari', 'sandeepmaheshwari', 'hi', 'India', 'Education', 'motivation'],
+  ['Abhi and Niyu', 'abhiandniyu', 'en', 'India', 'Education', ''],
+  ['Thugesh', 'thugesh', 'hi', 'India', 'Entertainment', ''],
+  ['Slayy Point', 'slayypoint', 'hi', 'India', 'Entertainment', ''],
+  ['Gaurav Chaudhary', 'technicalguruji', 'hi', 'India', 'Technology', 'technical guruji'],
+  ['Satish Kushwaha', 'satishkushwaha', 'hi', 'India', 'Technology', ''],
+  ['Khan GS Research Centre', 'khangsresearchcentre', 'hi', 'India', 'Education', 'khan sir'],
+  ['Virat Kohli', 'viratkohli', 'en', 'India', 'Sports', 'kohli cricket'],
+  ['Bhuvan Bam', 'bhuvanbam22', 'hi', 'India', 'Entertainment', 'bb ki vines titu mama'],
+  // World: tech, vlogs, challenges, comedy, food, sport
+  ['Linus Tech Tips', 'linustechtips', 'en', 'Canada', 'Technology', 'ltt linus'],
+  ['Unbox Therapy', 'unboxtherapy', 'en', 'Canada', 'Technology', 'lew'],
+  ['Mrwhosetheboss', 'mrwhosetheboss', 'en', 'United Kingdom', 'Technology', 'arun maini'],
+  ['iJustine', 'ijustine', 'en', 'United States', 'Technology', 'justine'],
+  ['Casey Neistat', 'casey', 'en', 'United States', 'Travel', 'casey'],
+  ['Yes Theory', 'yestheory', 'en', 'World', 'Travel', ''],
+  ['Drew Binsky', 'drewbinsky', 'en', 'World', 'Travel', ''],
+  ['Kara and Nate', 'karaandnate', 'en', 'World', 'Travel', ''],
+  ['Ryan Trahan', 'ryan', 'en', 'United States', 'Entertainment', ''],
+  ['Airrack', 'airrack', 'en', 'United States', 'Entertainment', ''],
+  ['Logan Paul', 'loganpaul', 'en', 'United States', 'Entertainment', ''],
+  ['KSI', 'ksi', 'en', 'United Kingdom', 'Entertainment', 'sidemen'],
+  ['Sidemen', 'sidemen', 'en', 'United Kingdom', 'Entertainment', ''],
+  ['IShowSpeed', 'ishowspeed', 'en', 'United States', 'Entertainment', 'speed'],
+  ['Markiplier', 'markiplier', 'en', 'United States', 'Gaming', ''],
+  ['PewDiePie', 'pewdiepie', 'en', 'World', 'Gaming', 'felix'],
+  ['Khaby Lame', 'khabylame', 'en', 'World', 'Entertainment', 'khaby'],
+  ['Brent Rivera', 'brentrivera', 'en', 'United States', 'Entertainment', ''],
+  ['Emma Chamberlain', 'emmachamberlain', 'en', 'United States', 'Fashion', ''],
+  ['Johnny Harris', 'johnnyharris', 'en', 'United States', 'Education', ''],
+  ['Ali Abdaal', 'aliabdaal', 'en', 'United Kingdom', 'Education', 'productivity'],
+  ['Peter McKinnon', 'petermckinnon', 'en', 'Canada', 'Photography', ''],
+  ['Nick DiGiovanni', 'nickdigiovanni', 'en', 'United States', 'Food', ''],
+  ['Joshua Weissman', 'joshuaweissman', 'en', 'United States', 'Food', ''],
+  ['Babish Culinary Universe', 'babishculinaryuniverse', 'en', 'United States', 'Food', 'babish'],
+  ['Cristiano Ronaldo', 'cristiano', 'en', 'World', 'Sports', 'ronaldo cr7 ur cristiano'],
+  ['Chris Heria', 'chrisheria', 'en', 'United States', 'Sports', 'fitness calisthenics'],
+  ['TED', 'ted', 'en', 'World', 'Education', 'ted talks'],
+  ['National Geographic', 'natgeo', 'en', 'World', 'Nature', 'nat geo'],
+  ['NASA', 'nasa', 'en', 'United States', 'Science', 'space'],
+  ['WIRED', 'wired', 'en', 'United States', 'Technology', ''],
+  ['The Tonight Show', 'fallontonight', 'en', 'United States', 'Entertainment', 'jimmy fallon'],
+  ['Mr Bean', 'mrbean', 'en', 'United Kingdom', 'Entertainment', 'bean cartoon'],
+  // Cartoons and anime (official channels)
+  ['Cartoon Network India', 'cartoonnetworkindia', 'hi', 'India', 'Entertainment', 'cartoon cn ben 10 kids'],
+  ['Cartoon Network', 'cartoonnetwork', 'en', 'World', 'Entertainment', 'cartoon cn kids'],
+  ['Ben 10', 'ben10', 'en', 'World', 'Entertainment', 'cartoon ben ten'],
+  ['Sony YAY!', 'sonyyay', 'hi', 'India', 'Entertainment', 'cartoon kids obocchama'],
+  ['Pogo', 'pogochannel', 'hi', 'India', 'Entertainment', 'cartoon kids'],
+  ['Chhota Bheem', 'chhotabheem', 'hi', 'India', 'Entertainment', 'cartoon bheem kids green gold'],
+  ['Nickelodeon India', 'nickindia', 'hi', 'India', 'Entertainment', 'cartoon motu patlu shiva kids'],
+  ['Disney Channel India', 'disneychannelindia', 'hi', 'India', 'Entertainment', 'cartoon doraemon shinchan kids'],
+  ['Doraemon', 'doraemon', 'hi', 'World', 'Entertainment', 'cartoon anime doremon nobita'],
+  ['Crayon Shin-chan', 'crayonshinchanofficial', 'hi', 'World', 'Entertainment', 'cartoon anime shinchan chin chan shin chan'],
+  ['Pokémon', 'pokemon', 'en', 'World', 'Entertainment', 'cartoon anime pokemon pikachu'],
+  ['Crunchyroll', 'crunchyroll', 'en', 'World', 'Entertainment', 'anime naruto one piece demon slayer'],
+  ['Netflix Anime', 'netflixanime', 'en', 'World', 'Entertainment', 'anime'],
+  ['Toei Animation', 'toeianimation', 'en', 'World', 'Entertainment', 'anime dragon ball one piece'],
+  ['WB Kids', 'wbkids', 'en', 'World', 'Entertainment', 'cartoon tom and jerry looney tunes scooby'],
+  ['Tom and Jerry', 'tomandjerry', 'en', 'World', 'Entertainment', 'cartoon tom jerry'],
+  ['SpongeBob SquarePants', 'spongebob', 'en', 'World', 'Entertainment', 'cartoon spongebob'],
+  ['Nickelodeon', 'nickelodeon', 'en', 'World', 'Entertainment', 'cartoon kids'],
+  ['Disney Channel', 'disneychannel', 'en', 'World', 'Entertainment', 'cartoon kids'],
+  ['Peppa Pig', 'peppapig', 'en', 'World', 'Entertainment', 'cartoon kids'],
+  ['Mr Bean Cartoon', 'mrbeancartoonworld', 'en', 'World', 'Entertainment', 'cartoon bean'],
+];
+
+const FAMOUS_FILE = path.join(__dirname, 'famous-cache.json');
+let famous = {}; // handle -> { channelId, avatar, at }
+try { famous = JSON.parse(fs.readFileSync(FAMOUS_FILE, 'utf8')) || {}; } catch (e) { }
+
+// Find a channel from its @handle by reading the public channel page (no API quota)
+async function resolveHandle(handle) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 15000);
+  try {
+    const r = await fetch(`https://www.youtube.com/@${handle}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36', 'Accept-Language': 'en' },
+      signal: controller.signal,
+    });
+    if (!r.ok) throw new Error(`status ${r.status}`);
+    const html = await r.text();
+    const m = /"externalId":"(UC[\w-]{22})"/.exec(html) || /channel_id=(UC[\w-]{22})/.exec(html) || /"channelId":"(UC[\w-]{22})"/.exec(html);
+    if (!m) throw new Error('channel not found');
+    const img = /<meta property="og:image" content="([^"]+)"/.exec(html);
+    return { channelId: m[1], avatar: img ? img[1] : undefined, at: Date.now() };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function resolveFamous() {
+  const todo = FAMOUS_CREATORS.filter(([, h]) => !famous[h] || (!famous[h].channelId && Date.now() - famous[h].at > 24 * 3600 * 1000));
+  if (!todo.length) return;
+  let ok = 0;
+  const failed = [];
+  await runLimited(todo, 3, async ([name, h]) => {
+    try {
+      famous[h] = await resolveHandle(h);
+      if (famous[h].avatar) channelAvatars[famous[h].channelId] = famous[h].avatar;
+      ok++;
+    } catch (e) {
+      famous[h] = { channelId: '', at: Date.now() };
+      failed.push(name);
+    }
+  });
+  try { fs.writeFileSync(FAMOUS_FILE, JSON.stringify(famous)); } catch (e) { }
+  console.log(`Famous creators: ${ok} found. Not found: ${failed.join(', ') || 'none'}`);
+}
+
+// In the same shape as CREATOR_CHANNELS
+function famousChannels() {
+  const have = new Set(CREATOR_CHANNELS.map(c => c[1]));
+  return FAMOUS_CREATORS
+    .filter(([, h]) => famous[h] && famous[h].channelId && !have.has(famous[h].channelId))
+    .map(([name, h, lang, country, category]) => [name, famous[h].channelId, lang, country, category]);
+}
+
+// Shorts from a channel's free public feed (no API quota). Falls back to the API.
+async function rssShorts(name, channelId) {
+  const feed = await parser.parseURL(`https://www.youtube.com/feeds/videos.xml?playlist_id=UUSH${channelId.slice(2)}`);
+  return (feed.items || [])
+    .map(it => {
+      const id = String(it.id || '').replace('yt:video:', '') || ((/[?&]v=([\w-]{11})/.exec(it.link || '') || [])[1]);
+      return id && /^[\w-]{11}$/.test(id) ? { id, title: it.title || name, publishedAt: it.isoDate || it.pubDate, channel: name, channelId } : null;
+    })
+    .filter(Boolean)
+    .slice(0, 15);
+}
+
+// Shorts from the public feed are already short, so they skip the (paid) check
+function rssToReels(items, info) {
+  return items.map(x => ({
+    id: md5('yt:' + x.id),
+    title: stripHtml(x.title),
+    description: x.channel,
+    author: x.channel,
+    link: `https://www.youtube.com/shorts/${x.id}`,
+    publishedAt: new Date(x.publishedAt || Date.now()).toISOString(),
+    source: x.channel,
+    language: info.language,
+    country: info.country,
+    category: info.category,
+    imageUrl: `https://i.ytimg.com/vi/${x.id}/hqdefault.jpg`,
+    videoUrl: `https://www.youtube.com/embed/${x.id}`,
+    videoType: 'youtube',
+    isShort: true,
+    vertical: true,
+    channelId: x.channelId,
+    kind: info.kind || 'creator',
+  }));
+}
+
 async function fetchChannelShorts([name, channelId, language, country, category]) {
+  const info = { language, country, category, kind: category === 'World' ? 'news' : 'creator' };
+  // 1) the free public feed (saves the daily YouTube quota)
+  try {
+    const items = await rssShorts(name, channelId);
+    if (items.length) return rssToReels(items, info);
+  } catch (e) { }
+  // 2) the YouTube API
   const playlistId = 'UUSH' + channelId.slice(2); // the channel's Shorts list
   const list = await ytGet(`playlistItems?part=snippet&maxResults=20&playlistId=${playlistId}`);
   const items = (list.items || [])
     .map(it => it.snippet || {})
     .filter(sn => sn.resourceId && sn.resourceId.videoId && sn.title !== 'Private video' && sn.title !== 'Deleted video')
     .map(sn => ({ id: sn.resourceId.videoId, title: sn.title, publishedAt: sn.publishedAt, channel: name, channelId }));
-  return toYoutubeReels(items, { language, country, category, kind: category === 'World' ? 'news' : 'creator' });
+  return toYoutubeReels(items, info);
 }
 
 // Popular Shorts from any creator for one topic, from the last 2 weeks
@@ -592,15 +786,16 @@ let ytCreatorsTimer = null;
 function refreshCreators() {
   if (ytCreatorsRefreshing) return ytCreatorsRefreshing;
   ytCreatorsRefreshing = (async () => {
-    if (!YT_API_KEY) return;
-    const results = await runLimited(CREATOR_CHANNELS, 4, fetchChannelShorts);
+    await resolveFamous().catch(e => console.log('Famous creators error:', e.message));
+    const channels = [...CREATOR_CHANNELS, ...famousChannels()];
+    const results = await runLimited(channels, 4, fetchChannelShorts);
     const all = [];
     const failed = [];
     results.forEach((r, i) => {
       if (r.status === 'fulfilled') all.push(...r.value);
       else {
-        failed.push(CREATOR_CHANNELS[i][0]);
-        console.log(`  x creator "${CREATOR_CHANNELS[i][0]}": ${r.reason.message}`);
+        failed.push(channels[i][0]);
+        console.log(`  x creator "${channels[i][0]}": ${r.reason.message}`);
       }
     });
     if (all.length) ytCreators = { at: Date.now(), items: all, failed };
@@ -1277,11 +1472,13 @@ async function refreshUnsplash() {
       });
     }
   });
-  if (all.length) {
-    more.unsplash = { at: Date.now(), photos: all };
+  const ids = new Set();
+  const uniq = all.filter(p => !ids.has(p.id) && ids.add(p.id));
+  if (uniq.length) {
+    more.unsplash = { at: Date.now(), photos: uniq };
     saveMore();
   }
-  console.log(`Unsplash: ${all.length} photos`);
+  console.log(`Unsplash: ${uniq.length} photos`);
 }
 
 // ---------- Refresh schedule ----------
@@ -1462,6 +1659,19 @@ function buildPeople() {
   };
   cache.articles.forEach(add);
   allYoutubeItems().forEach(add);
+  // Famous creators can always be found, even before their Shorts are loaded
+  for (const [name, h, language, country, category, words] of FAMOUS_CREATORS) {
+    const f = famous[h];
+    const cid = f && f.channelId;
+    const existing = map.get(key(name)) || [...map.values()].find(c => cid && c.channelId === cid);
+    if (existing) {
+      existing.words = `${words || ''} ${h}`;
+      if (!existing.channelId && cid) existing.channelId = cid;
+      continue;
+    }
+    if (!cid) continue;
+    map.set(key(name), { id: key(name), name, kind: 'creator', category, language, country, channelId: cid, reels: 0, stories: 0, latest: '', words: `${words || ''} ${h}` });
+  }
   const list = [...map.values()];
   for (const c of list) c.imageUrl = avatarFor(c);
   peopleCache = { at: Date.now(), list };
@@ -1538,7 +1748,11 @@ async function channelShorts(channelId, name, info) {
   const hit = channelShortsCache.get(channelId);
   if (hit && Date.now() - hit.at < 3 * 3600 * 1000) return hit.items;
   let items = [];
-  for (const prefix of ['UUSH', 'UU']) { // Shorts list first, then all uploads
+  try {
+    const free = await rssShorts(name, channelId);
+    if (free.length) items = rssToReels(free, info);
+  } catch (e) { }
+  for (const prefix of items.length || !YT_API_KEY ? [] : ['UUSH', 'UU']) { // Shorts list first, then all uploads
     try {
       const list = await ytGet(`playlistItems?part=snippet&maxResults=30&playlistId=${prefix}${channelId.slice(2)}`);
       const raw = (list.items || [])
@@ -1574,7 +1788,11 @@ app.get('/api/people', async (req, res) => {
     const q = key(req.query.q).slice(0, 60);
     let list = buildPeople();
     if (q) {
-      list = list.filter(p => key(p.name).includes(q) || key(p.category).includes(q));
+      const qs = q.replace(/\s+/g, '');
+      list = list.filter(p =>
+        key(p.name).includes(q) || key(p.category).includes(q) ||
+        key(p.name).replace(/\s+/g, '').includes(qs) || (p.words && key(p.words).includes(q))
+      );
       list.sort((a, b) => {
         const sa = key(a.name).startsWith(q) ? 0 : 1;
         const sb = key(b.name).startsWith(q) ? 0 : 1;
@@ -1617,7 +1835,7 @@ app.get('/api/creator', async (req, res) => {
     let reelsList = allYoutubeItems()
       .filter(a => key(a.source) === k || (cid && a.channelId === cid))
       .filter(a => (seen.has(a.id) ? false : seen.add(a.id)));
-    if (cid && reelsList.length < 8 && YT_API_KEY) {
+    if (cid && reelsList.length < 8) {
       const extra = await channelShorts(cid, person.name, {
         language: person.language || 'any', country: person.country || 'World', category: person.category || 'Entertainment',
       });
@@ -1697,7 +1915,7 @@ app.post('/api/notify', async (req, res) => {
     const type = String((req.body && req.body.type) || '');
     const id = String((req.body && req.body.id) || '');
     if (!/^Bearer \S+$/.test(auth)) return res.status(401).json({ error: 'Please sign in' });
-    if (!['message', 'call', 'like', 'comment', 'follow'].includes(type) || !/^[0-9a-f-]{36}$/i.test(id)) {
+    if (!['message', 'call', 'like', 'comment', 'follow', 'story_like'].includes(type) || !/^[0-9a-f-]{36}$/i.test(id)) {
       return res.status(400).json({ error: 'Bad request' });
     }
     // The database checks that this person really sent this message / is making this call
@@ -1717,6 +1935,8 @@ app.post('/api/notify', async (req, res) => {
       priority: 'high',
       channelId: type === 'call' ? 'calls' : type === 'message' ? 'messages' : 'activity',
       data: { type, ref: x.ref },
+      // Calls: "Answer" / "Decline" buttons, and the alert is dropped after 60 seconds
+      ...(type === 'call' ? { categoryId: 'call', ttl: 60 } : {}),
     }));
     const sent = await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
