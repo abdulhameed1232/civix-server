@@ -2001,6 +2001,88 @@ app.post('/api/notify', async (req, res) => {
   }
 });
 
+// ---------- Sign in with @username, and "forgot password" with @username ----------
+// Needs SUPABASE_SECRET_KEY on Render (Supabase → Project Settings → API Keys → secret key).
+// It never leaves the server.
+const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || '';
+const RESET_URL = 'https://civix-server-c961.onrender.com/reset';
+const tries = new Map(); // simple limit: 10 tries per minute per phone
+function tooMany(req) {
+  const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+  const now = Date.now();
+  const list = (tries.get(ip) || []).filter(t => now - t < 60 * 1000);
+  list.push(now);
+  tries.set(ip, list);
+  if (tries.size > 5000) tries.clear();
+  return list.length > 10;
+}
+const isEmailText = s => /^\S+@\S+\.\S+$/.test(s);
+async function emailForLogin(login) {
+  const t = String(login || '').trim().toLowerCase();
+  if (isEmailText(t)) return t;
+  const name = t.replace(/^@/, '');
+  if (!/^[a-z0-9._]{3,20}$/.test(name) || !SUPABASE_SECRET_KEY) return null;
+  const headers = { apikey: SUPABASE_SECRET_KEY, 'Content-Type': 'application/json' };
+  if (SUPABASE_SECRET_KEY.startsWith('eyJ')) headers.Authorization = `Bearer ${SUPABASE_SECRET_KEY}`;
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/email_of_username`, { method: 'POST', headers, body: JSON.stringify({ u: name }) });
+  if (!r.ok) {
+    console.log('email_of_username error:', r.status);
+    return null;
+  }
+  const email = await r.json();
+  return typeof email === 'string' && email ? email : null;
+}
+
+app.post('/api/login', async (req, res) => {
+  try {
+    if (tooMany(req)) return res.status(429).json({ error: 'Too many tries. Wait a minute and try again.' });
+    const login = String((req.body && req.body.login) || '').slice(0, 120);
+    const password = String((req.body && req.body.password) || '').slice(0, 200);
+    if (!login || !password) return res.status(400).json({ error: 'Enter your username and password.' });
+    if (!isEmailText(login.trim()) && !SUPABASE_SECRET_KEY) {
+      return res.status(503).json({ error: 'Signing in with a username is not ready yet. Please use your email.' });
+    }
+    const email = await emailForLogin(login);
+    if (!email) return res.status(400).json({ error: 'Wrong username or password.' });
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.access_token) return res.status(400).json({ error: 'Wrong username or password.' });
+    res.json({ access_token: j.access_token, refresh_token: j.refresh_token });
+  } catch (e) {
+    console.error('login error:', e);
+    res.status(500).json({ error: 'Could not sign in. Please try again.' });
+  }
+});
+
+app.post('/api/forgot', async (req, res) => {
+  try {
+    if (tooMany(req)) return res.status(429).json({ error: 'Too many tries. Wait a minute and try again.' });
+    const login = String((req.body && req.body.login) || '').slice(0, 120);
+    if (!isEmailText(login.trim()) && !SUPABASE_SECRET_KEY) {
+      return res.status(503).json({ error: 'Reset with a username is not ready yet. Please use your email.' });
+    }
+    const email = await emailForLogin(login);
+    if (email) {
+      const r = await fetch(`${SUPABASE_URL}/auth/v1/recover?redirect_to=${encodeURIComponent(RESET_URL)}`, {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      if (r.status === 429) return res.status(429).json({ error: 'Too many emails were sent. Try again in a few minutes.' });
+      if (!r.ok) console.log('recover error:', r.status, await r.text().catch(() => ''));
+    }
+    // Same answer either way, so nobody can find out which usernames exist
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('forgot error:', e);
+    res.status(500).json({ error: 'Could not send the email. Please try again.' });
+  }
+});
+
 // ---------- Reset password page (the link in the "Reset your password" email opens this) ----------
 const RESET_PAGE = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CIVIX · New password</title>
