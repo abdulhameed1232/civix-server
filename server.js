@@ -354,7 +354,7 @@ function pickVideoFile(files) {
     v => v.link && (v.file_type || '').includes('mp4') && v.height > v.width
   );
   if (!mp4.length) return null;
-  mp4.sort((a, b) => Math.abs(a.height - 1280) - Math.abs(b.height - 1280));
+  mp4.sort((a, b) => Math.abs(a.height - 960) - Math.abs(b.height - 960));
   return mp4[0];
 }
 
@@ -405,7 +405,8 @@ function pickPixabayFile(videos) {
     .map(k => videos && videos[k])
     .filter(v => v && v.url && v.width && v.height);
   if (!files.length) return null;
-  files.sort((a, b) => Math.abs(Math.max(a.width, a.height) - 1280) - Math.abs(Math.max(b.width, b.height) - 1280));
+  // ~720p: sharp on phones, but small enough to start fast (less lag)
+  files.sort((a, b) => Math.abs(Math.max(a.width, a.height) - 960) - Math.abs(Math.max(b.width, b.height) - 960));
   return files[0];
 }
 
@@ -1198,7 +1199,7 @@ app.post('/api/notify', async (req, res) => {
     const type = String((req.body && req.body.type) || '');
     const id = String((req.body && req.body.id) || '');
     if (!/^Bearer \S+$/.test(auth)) return res.status(401).json({ error: 'Please sign in' });
-    if (!['message', 'call'].includes(type) || !/^[0-9a-f-]{36}$/i.test(id)) {
+    if (!['message', 'call', 'like', 'comment', 'follow'].includes(type) || !/^[0-9a-f-]{36}$/i.test(id)) {
       return res.status(400).json({ error: 'Bad request' });
     }
     // The database checks that this person really sent this message / is making this call
@@ -1216,7 +1217,7 @@ app.post('/api/notify', async (req, res) => {
       body: x.body,
       sound: 'default',
       priority: 'high',
-      channelId: type === 'call' ? 'calls' : 'messages',
+      channelId: type === 'call' ? 'calls' : type === 'message' ? 'messages' : 'activity',
       data: { type, ref: x.ref },
     }));
     const sent = await fetch('https://exp.host/--/api/v2/push/send', {
