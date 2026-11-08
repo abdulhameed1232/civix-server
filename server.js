@@ -2103,23 +2103,78 @@ function toTrack(t) {
     link: t.permalink ? `https://audius.co${t.permalink}` : 'https://audius.co',
   };
 }
+// Popular and movie songs: 30-second clips from Apple Music (iTunes) and Deezer, with the artist's name
+const appleSong = t => ({
+  id: `it-${t.trackId}`,
+  title: stripHtml(t.trackName || 'Song'),
+  artist: stripHtml(t.artistName || ''),
+  artwork: t.artworkUrl100 ? t.artworkUrl100.replace('100x100', '300x300') : undefined,
+  duration: 30,
+  stream: t.previewUrl,
+  link: t.trackViewUrl,
+  clip: true,
+  album: t.collectionName,
+});
+async function appleSearch(q, country) {
+  const data = await getJson(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=30&country=${country}`);
+  return (data.results || []).filter(t => t.previewUrl && t.trackExplicitness !== 'explicit').map(appleSong);
+}
+async function appleTopIndia() {
+  const top = await getJson('https://rss.applemarketingtools.com/api/v2/in/music/most-played/40/songs.json');
+  const ids = ((top.feed && top.feed.results) || []).map(r => r.id).filter(Boolean).slice(0, 40);
+  if (!ids.length) return [];
+  const data = await getJson(`https://itunes.apple.com/lookup?id=${ids.join(',')}&country=IN&entity=song`);
+  return (data.results || []).filter(t => t.previewUrl && t.trackExplicitness !== 'explicit').map(appleSong);
+}
+async function deezerSearch(q) {
+  const data = await getJson(q ? `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=30` : 'https://api.deezer.com/chart/0/tracks?limit=30');
+  return (data.data || [])
+    .filter(t => t && t.preview && !t.explicit_lyrics)
+    .map(t => ({
+      id: `dz-${t.id}`,
+      title: stripHtml(t.title || 'Song'),
+      artist: stripHtml((t.artist && t.artist.name) || ''),
+      artwork: t.album && (t.album.cover_medium || t.album.cover),
+      duration: 30,
+      stream: t.preview,
+      link: t.link,
+      clip: true,
+    }));
+}
+async function audiusTracks(q) {
+  const data = await getJson(
+    q ? `${AUDIUS}/tracks/search?query=${encodeURIComponent(q)}&app_name=${APP_NAME}` : `${AUDIUS}/tracks/trending?time=week&app_name=${APP_NAME}`
+  );
+  return (data.data || [])
+    .filter(t => t && t.id && t.is_streamable !== false && !t.is_stream_gated && (t.duration || 0) >= 15 && safeText(t.title))
+    .slice(0, 25)
+    .map(toTrack);
+}
 app.get('/api/music', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim().slice(0, 60);
     const k = q.toLowerCase() || '__trending';
     const hit = musicCache.get(k);
     if (hit && Date.now() - hit.at < 30 * 60 * 1000) return res.json({ tracks: hit.list });
-    const url = q
-      ? `${AUDIUS}/tracks/search?query=${encodeURIComponent(q)}&app_name=${APP_NAME}`
-      : `${AUDIUS}/tracks/trending?time=week&app_name=${APP_NAME}`;
-    const data = await getJson(url);
-    const list = (data.data || [])
-      .filter(t => t && t.id && t.is_streamable !== false && !t.is_stream_gated && (t.duration || 0) >= 15 && safeText(t.title))
-      .slice(0, 40)
-      .map(toTrack);
-    musicCache.set(k, { at: Date.now(), list });
+    const jobs = q
+      ? [appleSearch(q, 'IN'), deezerSearch(q), audiusTracks(q), appleSearch(q, 'US')]
+      : [appleTopIndia(), deezerSearch(''), audiusTracks('')];
+    const results = await Promise.allSettled(jobs);
+    results.forEach((r, i) => r.status === 'rejected' && console.log(`Music source ${i} error:`, r.reason && r.reason.message));
+    const lists = results.map(r => (r.status === 'fulfilled' ? r.value : []));
+    // Movie / popular songs first, then independent artists; no repeats of the same song
+    const seen = new Set();
+    const out = [];
+    for (const t of [...lists[0], ...lists[1], ...(lists[3] || []), ...lists[2]]) {
+      const key = `${t.title}|${t.artist}`.toLowerCase();
+      if (!t.stream || seen.has(key)) continue;
+      seen.add(key);
+      out.push(t);
+      if (out.length >= 60) break;
+    }
+    musicCache.set(k, { at: Date.now(), list: out });
     if (musicCache.size > 300) musicCache.delete(musicCache.keys().next().value);
-    res.json({ tracks: list });
+    res.json({ tracks: out });
   } catch (e) {
     console.log('Music error:', e.message);
     res.json({ tracks: [] });
