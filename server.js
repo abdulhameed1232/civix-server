@@ -2086,6 +2086,46 @@ app.post('/api/forgot', async (req, res) => {
   }
 });
 
+// ---------- Music for stories and posts (Audius: free, artists share their music for apps) ----------
+const AUDIUS = 'https://api.audius.co/v1';
+const APP_NAME = 'CIVIX';
+const musicCache = new Map();
+function toTrack(t) {
+  const art = t.artwork || {};
+  return {
+    id: String(t.id),
+    title: stripHtml(t.title || 'Untitled'),
+    artist: stripHtml((t.user && (t.user.name || t.user.handle)) || 'Unknown artist'),
+    artwork: art['480x480'] || art['150x150'] || art['1000x1000'] || undefined,
+    duration: t.duration || 0,
+    genre: t.genre || '',
+    stream: `${AUDIUS}/tracks/${encodeURIComponent(t.id)}/stream?app_name=${APP_NAME}`,
+    link: t.permalink ? `https://audius.co${t.permalink}` : 'https://audius.co',
+  };
+}
+app.get('/api/music', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 60);
+    const k = q.toLowerCase() || '__trending';
+    const hit = musicCache.get(k);
+    if (hit && Date.now() - hit.at < 30 * 60 * 1000) return res.json({ tracks: hit.list });
+    const url = q
+      ? `${AUDIUS}/tracks/search?query=${encodeURIComponent(q)}&app_name=${APP_NAME}`
+      : `${AUDIUS}/tracks/trending?time=week&app_name=${APP_NAME}`;
+    const data = await getJson(url);
+    const list = (data.data || [])
+      .filter(t => t && t.id && t.is_streamable !== false && !t.is_stream_gated && (t.duration || 0) >= 15 && safeText(t.title))
+      .slice(0, 40)
+      .map(toTrack);
+    musicCache.set(k, { at: Date.now(), list });
+    if (musicCache.size > 300) musicCache.delete(musicCache.keys().next().value);
+    res.json({ tracks: list });
+  } catch (e) {
+    console.log('Music error:', e.message);
+    res.json({ tracks: [] });
+  }
+});
+
 // ---------- Reset password page (the link in the "Reset your password" email opens this) ----------
 const RESET_PAGE = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CIVIX · New password</title>
