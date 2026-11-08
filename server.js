@@ -2016,7 +2016,7 @@ app.post('/api/test-push', async (req, res) => {
         body: kind === 'call' ? 'If you see this with CIVIX closed, calls will reach you.' : 'If you see this with CIVIX closed, notifications work!',
         sound: 'default',
         priority: 'high',
-        channelId: kind === 'call' ? 'calls' : 'messages',
+        channelId: kind === 'call' ? 'calls_ring' : 'messages',
         data: { type: 'test' },
       }], 'test').catch(e => console.log('Push test error:', e.message));
     }, 10000);
@@ -2064,7 +2064,7 @@ app.post('/api/notify', async (req, res) => {
       body: x.body,
       sound: 'default',
       priority: 'high',
-      channelId: type === 'call' ? 'calls' : type === 'message' ? 'messages' : 'activity',
+      channelId: type === 'call' ? 'calls_ring' : type === 'message' ? 'messages' : 'activity',
       data: { type, ref: x.ref },
       // Calls: "Answer" / "Decline" buttons, and the alert is dropped after 60 seconds
       ...(type === 'call' ? { categoryId: 'call', ttl: 60 } : {}),
