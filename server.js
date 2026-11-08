@@ -1962,6 +1962,80 @@ app.post('/api/call-token', async (req, res) => {
 // ============================================================
 // Notifications: tell the other phone about a new message or an incoming call
 // ============================================================
+// Send to Expo push and write any problem in the logs (also checks the delivery receipts)
+async function sendExpoPush(messages, label) {
+  const sent = await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(messages),
+  });
+  const j = await sent.json().catch(() => ({}));
+  if (!sent.ok) {
+    console.log(`Push ${label} error:`, sent.status, JSON.stringify(j).slice(0, 300));
+    return;
+  }
+  const tickets = Array.isArray(j.data) ? j.data : [];
+  const ids = [];
+  tickets.forEach(t => {
+    if (t.status === 'error') console.log(`Push ${label} ticket error:`, t.message, t.details ? JSON.stringify(t.details) : '');
+    else if (t.id) ids.push(t.id);
+  });
+  console.log(`Push ${label}: ${tickets.length} sent`);
+  if (!ids.length) return;
+  // Ask Expo 15 seconds later whether Google really delivered it
+  setTimeout(async () => {
+    try {
+      const r = await fetch('https://exp.host/--/api/v2/push/getReceipts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      const rj = await r.json().catch(() => ({}));
+      Object.values(rj.data || {}).forEach(rc => {
+        if (rc.status === 'error') console.log(`Push ${label} delivery error:`, rc.message, rc.details ? JSON.stringify(rc.details) : '');
+        else console.log(`Push ${label} delivered to Google ✓`);
+      });
+    } catch (e) { }
+  }, 15000);
+}
+
+// "Test notifications" button in the app: sends a test to this phone after 10 seconds
+app.post('/api/test-push', async (req, res) => {
+  try {
+    if (tooManyPush(req)) return res.status(429).json({ error: 'Wait a minute' });
+    const auth = String(req.headers.authorization || '');
+    const token = String((req.body && req.body.token) || '');
+    if (!/^Bearer \S+$/.test(auth) || !/^ExponentPushToken\[[\w-]+\]$/.test(token)) return res.status(400).json({ error: 'Bad request' });
+    const u = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_KEY, Authorization: auth } });
+    if (!u.ok) return res.status(401).json({ error: 'Please sign in' });
+    const kind = req.body.kind === 'call' ? 'call' : 'message';
+    setTimeout(() => {
+      sendExpoPush([{
+        to: token,
+        title: kind === 'call' ? '📞 Test call' : 'CIVIX test 🔔',
+        body: kind === 'call' ? 'If you see this with CIVIX closed, calls will reach you.' : 'If you see this with CIVIX closed, notifications work!',
+        sound: 'default',
+        priority: 'high',
+        channelId: kind === 'call' ? 'calls' : 'messages',
+        data: { type: 'test' },
+      }], 'test').catch(e => console.log('Push test error:', e.message));
+    }, 10000);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Could not send' });
+  }
+});
+const pushTries = new Map();
+function tooManyPush(req) {
+  const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+  const now = Date.now();
+  const list = (pushTries.get(ip) || []).filter(t => now - t < 60 * 1000);
+  list.push(now);
+  pushTries.set(ip, list);
+  if (pushTries.size > 5000) pushTries.clear();
+  return list.length > 5;
+}
+
 app.post('/api/notify', async (req, res) => {
   try {
     const auth = String(req.headers.authorization || '');
@@ -1977,8 +2051,12 @@ app.post('/api/notify', async (req, res) => {
       headers: { apikey: SUPABASE_KEY, Authorization: auth, 'Content-Type': 'application/json' },
       body: JSON.stringify({ kind: type, target_id: id }),
     });
+    if (!r.ok) console.log(`push_targets ${type} error:`, r.status, (await r.text().catch(() => '')).slice(0, 200));
     const rows = r.ok ? await r.json() : [];
-    if (!Array.isArray(rows) || !rows.length) return res.json({ sent: 0 });
+    if (!Array.isArray(rows) || !rows.length) {
+      console.log(`Push ${type}: nobody to send to (no saved phone for them)`);
+      return res.json({ sent: 0 });
+    }
 
     const messages = rows.slice(0, 20).map(x => ({
       to: x.token,
@@ -1991,12 +2069,7 @@ app.post('/api/notify', async (req, res) => {
       // Calls: "Answer" / "Decline" buttons, and the alert is dropped after 60 seconds
       ...(type === 'call' ? { categoryId: 'call', ttl: 60 } : {}),
     }));
-    const sent = await fetch('https://exp.host/--/api/v2/push/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(messages),
-    });
-    if (!sent.ok) console.log('Push error:', sent.status, await sent.text());
+    await sendExpoPush(messages, type);
     res.json({ sent: messages.length });
   } catch (e) {
     console.error('notify error:', e);
