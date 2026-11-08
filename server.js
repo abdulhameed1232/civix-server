@@ -1074,6 +1074,7 @@ const more = {
   nasa: { at: 0, items: [] },
   giphy: { at: 0, items: [] },
   unsplash: { at: 0, photos: [] },
+  lemmy: { at: 0, items: [], photos: [] },
 };
 try {
   const saved = JSON.parse(fs.readFileSync(MORE_CACHE_FILE, 'utf8'));
@@ -1318,6 +1319,65 @@ async function refreshMastodon() {
   console.log(`Mastodon: ${videos.length} videos, ${photos.length} photos`);
 }
 
+// ---------- Lemmy (like Reddit, open, no key): hot posts with photos and videos ----------
+const LEMMY_SERVERS = ['lemmy.world', 'sh.itjust.works', 'lemmy.ml'];
+const LEMMY_TOPIC = [
+  [/pic|photo|earth|nature|wildlife|aww|cats|dogs|animal/i, 'Nature'], [/game|gaming/i, 'Gaming'], [/tech|linux|android|programming/i, 'Technology'],
+  [/food|cook/i, 'Food'], [/space|science|physics/i, 'Science'], [/movie|film|tv|anime/i, 'Movies'], [/sport|football|soccer|cricket/i, 'Sports'],
+  [/music/i, 'Music'], [/art|draw|design/i, 'Art'], [/travel|city|map/i, 'Travel'], [/news|world|politic/i, 'World'],
+];
+const lemmyTopic = name => (LEMMY_TOPIC.find(([re]) => re.test(name)) || [null, 'Entertainment'])[1];
+async function refreshLemmy() {
+  const videos = [];
+  const photos = [];
+  const seen = new Set();
+  for (const host of LEMMY_SERVERS) {
+    let data;
+    try {
+      data = await getJson(`https://${host}/api/v3/post/list?sort=Hot&type_=All&limit=50`);
+    } catch (e) {
+      console.log(`Lemmy ${host} error:`, e.message);
+      continue;
+    }
+    for (const pv of data.posts || []) {
+      const post = pv.post || {};
+      const com = pv.community || {};
+      const who = pv.creator || {};
+      if (!post.url || post.nsfw || com.nsfw || post.removed || post.deleted) continue;
+      if (!safeText(post.name) || !safeText(com.name)) continue;
+      const key = post.ap_id || post.url;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const type = String(post.url_content_type || '');
+      const isVideo = /^video\//.test(type) || /\.(mp4|webm)(\?|$)/i.test(post.url);
+      const isImage = /^image\//.test(type) || /\.(jpe?g|png|webp)(\?|$)/i.test(post.url);
+      if (!isVideo && !isImage) continue;
+      const base = {
+        id: `lemmy-${host}-${post.id}`,
+        title: firstLine(post.name),
+        description: '',
+        link: post.ap_id || `https://${host}/post/${post.id}`,
+        publishedAt: post.published || new Date().toISOString(),
+        source: `c/${com.name}`,
+        author: `@${who.name || 'lemmy'}`,
+        authorAvatar: who.avatar,
+        language: 'en',
+        country: 'World',
+        category: lemmyTopic(`${com.name} ${com.title || ''}`),
+        provider: 'lemmy',
+        likes: (pv.counts && pv.counts.score) || 0,
+      };
+      if (isVideo && /\.mp4(\?|$)/i.test(post.url)) videos.push({ ...base, imageUrl: post.thumbnail_url, videoUrl: post.url, videoType: 'file', isShort: true, kind: 'creator' });
+      else if (isImage) photos.push({ ...base, type: 'photo', imageUrl: post.url, thumbUrl: post.thumbnail_url || post.url, credit: `Posted in c/${com.name} on Lemmy` });
+    }
+  }
+  if (videos.length || photos.length) {
+    more.lemmy = { at: Date.now(), items: videos, photos };
+    saveMore();
+  }
+  console.log(`Lemmy: ${videos.length} videos, ${photos.length} photos`);
+}
+
 // ---------- NASA (public, no key) ----------
 const NASA_TOPICS = ['earth from space', 'mars rover', 'rocket launch', 'astronaut', 'galaxy', 'moon', 'space station', 'solar eclipse'];
 async function refreshNasa() {
@@ -1498,6 +1558,7 @@ function startMoreSources() {
   every(refreshVimeo, 6 * 60 * MIN, 20 * 1000);
   every(refreshUnsplash, 6 * 60 * MIN, 25 * 1000);
   every(refreshNasa, 12 * 60 * MIN, 30 * 1000);
+  every(refreshLemmy, 30 * MIN, 35 * 1000);
 }
 
 // Take one from each site in turn, so Reels never shows 5 from the same site in a row
@@ -1521,13 +1582,14 @@ function moreVideos() {
     ...more.bluesky.items,
     ...more.mastodon.items,
     ...more.nasa.items,
+    ...more.lemmy.items,
   ];
 }
 
 // Photos and posts for Home "Discover" and the Explore grid
 app.get('/api/discover', (req, res) => {
   const max = Math.min(Number(req.query.limit) || 60, 200);
-  let photos = [...more.unsplash.photos, ...more.bluesky.photos, ...more.mastodon.photos];
+  let photos = [...more.unsplash.photos, ...more.bluesky.photos, ...more.mastodon.photos, ...more.lemmy.photos];
   const topic = String(req.query.category || '');
   if (topic) photos = photos.filter(p => p.category === topic);
   if (req.query.language) {
