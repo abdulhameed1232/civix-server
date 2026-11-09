@@ -21,6 +21,33 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://qwrgbgobzvzitzmlrpip.s
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'sb_publishable_dgi4izBtp0AqX_D7-zYa3Q_lhXtFgfs';
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+// Security headers on every reply
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    'Cross-Origin-Opener-Policy': 'same-origin',
+  });
+  next();
+});
+// Stop floods: max 240 requests per minute from one address
+const floodMap = new Map();
+app.use((req, res, next) => {
+  const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+  const now = Date.now();
+  const rec = floodMap.get(ip) || { n: 0, at: now };
+  if (now - rec.at > 60 * 1000) { rec.n = 0; rec.at = now; }
+  rec.n++;
+  floodMap.set(ip, rec);
+  if (floodMap.size > 20000) floodMap.clear();
+  if (rec.n > 240) return res.status(429).json({ error: 'Too many requests. Please wait a minute.' });
+  next();
+});
 app.use(cors());
 app.use(express.json({ limit: '10kb' }));
 
@@ -2766,5 +2793,14 @@ async function sendDueMessages() {
   } catch { }
 }
 setInterval(sendDueMessages, 60 * 1000);
+
+// Never show error details to visitors
+app.use((err, req, res, next) => {
+  console.log('Server error:', err && err.message);
+  if (res.headersSent) return next(err);
+  res.status(err && err.type === 'entity.too.large' ? 413 : 500).json({ error: 'Something went wrong' });
+});
+process.on('unhandledRejection', e => console.log('Unhandled:', e && e.message));
+process.on('uncaughtException', e => console.log('Uncaught:', e && e.message));
 
 app.listen(process.env.PORT || 4000, '0.0.0.0', () => console.log('CIVIX server running'));
