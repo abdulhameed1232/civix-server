@@ -2707,4 +2707,19 @@ app.post('/api/translate', async (req, res) => {
   }
 });
 
+// ---------- Scheduled chat messages: send the ones whose time has come (every minute) ----------
+async function sendDueMessages() {
+  if (!SUPABASE_SECRET_KEY) return;
+  try {
+    const headers = { apikey: SUPABASE_SECRET_KEY, 'Content-Type': 'application/json' };
+    if (SUPABASE_SECRET_KEY.startsWith('eyJ')) headers.Authorization = `Bearer ${SUPABASE_SECRET_KEY}`;
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/send_due_messages`, { method: 'POST', headers, body: '{}' });
+    if (r.ok) {
+      const n = await r.json();
+      if (n) console.log(`Scheduled messages sent: ${n}`);
+    }
+  } catch { }
+}
+setInterval(sendDueMessages, 60 * 1000);
+
 app.listen(process.env.PORT || 4000, '0.0.0.0', () => console.log('CIVIX server running'));
