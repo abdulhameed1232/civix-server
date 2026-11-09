@@ -2573,17 +2573,48 @@ const WEATHER_CODES = {
   71: ['Snow', '🌨️'], 73: ['Snow', '🌨️'], 75: ['Heavy snow', '❄️'], 80: ['Showers', '🌦️'], 81: ['Showers', '🌧️'], 82: ['Heavy showers', '⛈️'],
   95: ['Thunderstorm', '⛈️'], 96: ['Thunderstorm', '⛈️'], 99: ['Thunderstorm', '⛈️'],
 };
+// Find a city: tries "Dubai, UAE", then "Dubai", then common spellings
 async function findCity(city) {
-  const g = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=en&format=json`);
-  return g && g.results && g.results[0];
+  const tries = [];
+  const clean = String(city || '').replace(/[^\p{L}\p{N} ,.-]/gu, ' ').replace(/\s+/g, ' ').trim();
+  tries.push(clean);
+  if (clean.includes(',')) tries.push(clean.split(',')[0].trim());
+  tries.push(clean.replace(/\b(city|uae|india|u\.a\.e|emirates)\b/gi, '').trim());
+  for (const name of [...new Set(tries)].filter(Boolean)) {
+    try {
+      const g = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=1&language=en&format=json`);
+      if (g && g.results && g.results[0]) return g.results[0];
+    } catch (e) {
+      console.log('findCity error:', e.message);
+    }
+  }
+  return null;
+}
+// Use phone location (latitude/longitude) when given
+async function placeFrom(req) {
+  const lat = Number(req.query.lat);
+  const lon = Number(req.query.lon);
+  if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+    let name = 'Your location';
+    let country_code = '';
+    try {
+      const r = await getJson(`https://nominatim.openstreetmap.org/reverse?format=json&zoom=10&lat=${lat}&lon=${lon}`, { 'User-Agent': 'CIVIX/1.0 (weather)' });
+      const a = (r && r.address) || {};
+      name = a.city || a.town || a.village || a.state || name;
+      country_code = String(a.country_code || '').toUpperCase();
+    } catch { }
+    return { name, latitude: Math.round(lat * 100) / 100, longitude: Math.round(lon * 100) / 100, country_code };
+  }
+  return findCity(cleanQ(req.query.city));
 }
 app.get('/api/weather', async (req, res) => {
   const city = cleanQ(req.query.city);
-  if (city.length < 2) return res.json({ error: 'Type your city' });
+  const hasPos = req.query.lat && req.query.lon;
+  if (city.length < 2 && !hasPos) return res.json({ error: 'Type your city' });
   try {
-    const out = await cached(`w:${city.toLowerCase()}`, 20 * 60 * 1000, async () => {
-      const c = await findCity(city);
-      if (!c) return { error: 'City not found' };
+    const out = await cached(`w:${hasPos ? `${Number(req.query.lat).toFixed(2)},${Number(req.query.lon).toFixed(2)}` : city.toLowerCase()}`, 20 * 60 * 1000, async () => {
+      const c = await placeFrom(req);
+      if (!c) return { error: `Could not find "${city}". Try just the city name, like Dubai.` };
       const w = await getJson(`https://api.open-meteo.com/v1/forecast?latitude=${c.latitude}&longitude=${c.longitude}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5`);
       const cur = w.current || {};
       const [text, icon] = WEATHER_CODES[cur.weather_code] || ['Weather', '🌡️'];
@@ -2603,12 +2634,13 @@ app.get('/api/weather', async (req, res) => {
 // ---------- Prayer times + Hijri date (Aladhan, free) ----------
 app.get('/api/prayer', async (req, res) => {
   const city = cleanQ(req.query.city);
-  if (city.length < 2) return res.json({ error: 'Type your city' });
+  const hasPos = req.query.lat && req.query.lon;
+  if (city.length < 2 && !hasPos) return res.json({ error: 'Type your city' });
   try {
-    const out = await cached(`p:${city.toLowerCase()}:${new Date().toISOString().slice(0, 10)}`, 3 * 60 * 60 * 1000, async () => {
-      const c = await findCity(city);
-      if (!c) return { error: 'City not found' };
-      const j = await getJson(`https://api.aladhan.com/v1/timings?latitude=${c.latitude}&longitude=${c.longitude}&method=${c.country_code === 'IN' ? 1 : 4}`);
+    const out = await cached(`p:${hasPos ? `${Number(req.query.lat).toFixed(2)},${Number(req.query.lon).toFixed(2)}` : city.toLowerCase()}:${new Date().toISOString().slice(0, 10)}`, 3 * 60 * 60 * 1000, async () => {
+      const c = await placeFrom(req);
+      if (!c) return { error: `Could not find "${city}". Try just the city name, like Dubai.` };
+      const j = await getJson(`https://api.aladhan.com/v1/timings?latitude=${c.latitude}&longitude=${c.longitude}&method=${c.country_code === 'IN' ? 1 : c.country_code === 'AE' ? 16 : 4}`);
       const t = (j.data && j.data.timings) || {};
       const h = j.data && j.data.date && j.data.date.hijri;
       return {
