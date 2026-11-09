@@ -2707,6 +2707,19 @@ app.post('/api/translate', async (req, res) => {
   }
 });
 
+// ---------- Profile links: https://…/u/<username> (opens CIVIX if installed) ----------
+app.get('/u/:name', (req, res) => {
+  const name = String(req.params.name || '').toLowerCase().replace(/[^a-z0-9._]/g, '').slice(0, 20);
+  res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>@${name} on CIVIX</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#000;color:#fff;font-family:-apple-system,Segoe UI,Roboto,sans-serif;text-align:center}
+.c{padding:28px}.l{width:84px;height:84px;border-radius:24px;margin:0 auto 18px;background:linear-gradient(45deg,#FF8A00,#FF2D78 55%,#7B2FF7);display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:900}
+a{display:inline-block;margin-top:18px;background:#FF2D78;color:#fff;text-decoration:none;font-weight:800;padding:14px 26px;border-radius:14px}p{color:#aaa}</style></head>
+<body><div class="c"><div class="l">C</div><h2>@${name}</h2><p>is on CIVIX – reels, news, chats and calls in one app.</p>
+<a href="civix://u/${name}">Open in CIVIX</a><p style="margin-top:22px;font-size:13px">Don't have CIVIX yet? Ask @${name} to send you the app.</p></div>
+<script>setTimeout(function(){location.href='civix://u/${name}'},300)</script></body></html>`);
+});
+
 // ---------- Scheduled chat messages: send the ones whose time has come (every minute) ----------
 async function sendDueMessages() {
   if (!SUPABASE_SECRET_KEY) return;
