@@ -2366,4 +2366,345 @@ refreshYoutube();
 refreshYoutubeSearch();
 refreshCreators();
 startMoreSources();
+
+// ============================================================
+// PART 2: Search the internet + "All in one" (weather, prayer, scores, trailers, memes, jobs, prices)
+// Everything here is free and needs no keys. Ask CIVIX AI uses ANTHROPIC_API_KEY only if you add it in Render.
+// ============================================================
+const hubCache = new Map();
+async function cached(key, ms, fn) {
+  const hit = hubCache.get(key);
+  if (hit && Date.now() - hit.at < ms) return hit.value;
+  const value = await fn();
+  // Do not remember failures or empty results (try again next time)
+  const empty = v => v == null || v.error || (Array.isArray(v) && !v.length)
+    || (v.q && !v.ai && !v.wiki && !(v.news || []).length && !(v.videos || []).length)
+    || (v.cricket && !v.cricket.length && !v.football.length);
+  if (!empty(value)) hubCache.set(key, { at: Date.now(), value });
+  if (hubCache.size > 500) hubCache.delete(hubCache.keys().next().value);
+  return value;
+}
+const BROWSER = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en' };
+async function getText(url, headers = {}) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 15000);
+  try {
+    const r = await fetch(url, { headers: { ...BROWSER, ...headers }, signal: controller.signal });
+    if (!r.ok) throw new Error(`status ${r.status}`);
+    return await r.text();
+  } finally {
+    clearTimeout(t);
+  }
+}
+const hubTries = new Map();
+function hubTooMany(req) {
+  const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+  const now = Date.now();
+  const list = (hubTries.get(ip) || []).filter(t => now - t < 60 * 1000);
+  list.push(now);
+  hubTries.set(ip, list);
+  if (hubTries.size > 5000) hubTries.clear();
+  return list.length > 30;
+}
+const cleanQ = q => String(q || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+
+// ---------- YouTube video search (shorts + normal videos), free, no key ----------
+async function youtubeSearch(q, shortsOnly) {
+  const sp = shortsOnly ? '&sp=EgIYAQ%253D%253D' : '';
+  const html = await getText(`https://www.youtube.com/results?search_query=${encodeURIComponent(q)}${sp}&hl=en`);
+  const m = /var ytInitialData = (\{.*?\});<\/script>/s.exec(html);
+  if (!m) return [];
+  const data = JSON.parse(m[1]);
+  const out = [];
+  const seen = new Set();
+  const walk = o => {
+    if (!o || typeof o !== 'object' || out.length >= 40) return;
+    const v = o.videoRenderer;
+    if (v && v.videoId && !seen.has(v.videoId)) {
+      seen.add(v.videoId);
+      const title = (v.title && ((v.title.runs || []).map(x => x.text).join('') || v.title.simpleText)) || '';
+      const ch = (v.ownerText && (v.ownerText.runs || [])[0]) || {};
+      const live = !!(v.badges || []).find(b => JSON.stringify(b).includes('LIVE'));
+      if (!live && safeText(title)) {
+        out.push({ id: v.videoId, title, channel: ch.text || 'YouTube', channelId: ch.navigationEndpoint && ch.navigationEndpoint.browseEndpoint && ch.navigationEndpoint.browseEndpoint.browseId });
+      }
+      return;
+    }
+    const r = o.reelItemRenderer || (o.shortsLockupViewModel && o.shortsLockupViewModel.onTap && o.shortsLockupViewModel);
+    if (o.reelItemRenderer && r.videoId && !seen.has(r.videoId)) {
+      seen.add(r.videoId);
+      const title = (r.headline && r.headline.simpleText) || '';
+      if (safeText(title)) out.push({ id: r.videoId, title, channel: 'YouTube Shorts' });
+      return;
+    }
+    if (o.shortsLockupViewModel) {
+      const vm = o.shortsLockupViewModel;
+      const id = vm.onTap && vm.onTap.innertubeCommand && vm.onTap.innertubeCommand.reelWatchEndpoint && vm.onTap.innertubeCommand.reelWatchEndpoint.videoId;
+      const title = (vm.overlayMetadata && vm.overlayMetadata.primaryText && vm.overlayMetadata.primaryText.content) || '';
+      if (id && !seen.has(id) && safeText(title)) {
+        seen.add(id);
+        out.push({ id, title, channel: 'YouTube Shorts' });
+      }
+      return;
+    }
+    for (const k in o) walk(o[k]);
+  };
+  walk(data);
+  return rssToReels(out.map(x => ({ ...x, publishedAt: new Date().toISOString() })), { language: 'any', country: 'World', category: 'Entertainment', kind: 'creator' });
+}
+
+app.get('/api/video-search', async (req, res) => {
+  const q = cleanQ(req.query.q);
+  if (q.length < 2) return res.json({ items: [] });
+  try {
+    const items = await cached(`vs:${q.toLowerCase()}:${req.query.shorts ? 1 : 0}`, 30 * 60 * 1000, async () => {
+      const [shorts, normal] = await Promise.all([
+        youtubeSearch(q, true).catch(() => []),
+        req.query.shorts ? Promise.resolve([]) : youtubeSearch(q, false).catch(() => []),
+      ]);
+      const seen = new Set();
+      return [...shorts, ...normal].filter(a => !seen.has(a.id) && seen.add(a.id)).slice(0, 50);
+    });
+    res.json({ items });
+  } catch (e) {
+    res.json({ items: [], error: 'Could not search videos right now' });
+  }
+});
+
+// ---------- Google News search (topic news, fact check, jobs, prices) ----------
+async function newsSearch(q, lang = 'en', country = 'IN') {
+  const hl = lang === 'en' ? `en-${country}` : lang;
+  const feed = await parser.parseURL(`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=${hl}&gl=${country}&ceid=${country}:${lang}`);
+  return (feed.items || []).slice(0, 25).map(it => {
+    const parts = String(it.title || '').split(' - ');
+    const source = parts.length > 1 ? parts.pop() : 'News';
+    return {
+      id: md5('gn:' + (it.link || it.title)),
+      title: parts.join(' - '),
+      description: '',
+      link: it.link,
+      publishedAt: new Date(it.isoDate || it.pubDate || Date.now()).toISOString(),
+      source,
+      category: 'World',
+      language: lang,
+    };
+  });
+}
+
+app.get('/api/topic-news', async (req, res) => {
+  const q = cleanQ(req.query.q);
+  if (q.length < 2) return res.json({ items: [] });
+  const lang = /^[a-z]{2}$/.test(String(req.query.lang || '')) ? String(req.query.lang) : 'en';
+  const country = /^[A-Z]{2}$/.test(String(req.query.country || '')) ? String(req.query.country) : 'IN';
+  try {
+    const items = await cached(`tn:${q}:${lang}:${country}`, 20 * 60 * 1000, () => newsSearch(q, lang, country));
+    res.json({ items });
+  } catch {
+    res.json({ items: [], error: 'News search is not available right now' });
+  }
+});
+
+// ---------- Wikipedia summary ----------
+async function wikiSummary(q) {
+  const s = await getJson(`https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(q)}&limit=1&namespace=0&format=json`);
+  const title = s && s[1] && s[1][0];
+  if (!title) return null;
+  const p = await getJson(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+  if (!p || !p.extract) return null;
+  return {
+    title: p.title,
+    text: p.extract,
+    image: p.thumbnail && p.thumbnail.source,
+    link: (p.content_urls && p.content_urls.mobile && p.content_urls.mobile.page) || `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}`,
+    source: 'Wikipedia',
+  };
+}
+
+// ---------- Ask CIVIX: answer + videos + news ----------
+async function aiAnswer(q, wiki, news) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return null;
+  const context = [
+    wiki ? `Wikipedia: ${wiki.text}` : '',
+    ...news.slice(0, 6).map(n => `News (${n.source}): ${n.title}`),
+  ].filter(Boolean).join('\n');
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
+      max_tokens: 400,
+      messages: [{
+        role: 'user',
+        content: `Answer this question for a social app user in simple English, in at most 6 short sentences. Use the context when it helps. If you are not sure, say so.\n\nContext:\n${context}\n\nQuestion: ${q}`,
+      }],
+    }),
+  });
+  if (!r.ok) return null;
+  const j = await r.json();
+  const text = (j.content || []).map(c => c.text || '').join('').trim();
+  return text || null;
+}
+
+app.get('/api/ask', async (req, res) => {
+  const q = cleanQ(req.query.q);
+  if (q.length < 2) return res.json({});
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many searches. Please wait a minute.' });
+  try {
+    const out = await cached(`ask:${q.toLowerCase()}`, 30 * 60 * 1000, async () => {
+      const [wiki, news, videos] = await Promise.all([
+        wikiSummary(q).catch(() => null),
+        newsSearch(q).catch(() => []),
+        youtubeSearch(q, false).catch(() => []),
+      ]);
+      const ai = await aiAnswer(q, wiki, news).catch(() => null);
+      return { q, ai, wiki, news: news.slice(0, 12), videos: videos.slice(0, 30) };
+    });
+    res.json(out);
+  } catch {
+    res.json({ q, error: 'Search is not available right now' });
+  }
+});
+
+// ---------- Weather (Open-Meteo, free) ----------
+const WEATHER_CODES = {
+  0: ['Clear sky', '☀️'], 1: ['Mostly clear', '🌤️'], 2: ['Partly cloudy', '⛅'], 3: ['Cloudy', '☁️'], 45: ['Fog', '🌫️'], 48: ['Fog', '🌫️'],
+  51: ['Light drizzle', '🌦️'], 53: ['Drizzle', '🌦️'], 55: ['Drizzle', '🌧️'], 61: ['Light rain', '🌦️'], 63: ['Rain', '🌧️'], 65: ['Heavy rain', '🌧️'],
+  71: ['Snow', '🌨️'], 73: ['Snow', '🌨️'], 75: ['Heavy snow', '❄️'], 80: ['Showers', '🌦️'], 81: ['Showers', '🌧️'], 82: ['Heavy showers', '⛈️'],
+  95: ['Thunderstorm', '⛈️'], 96: ['Thunderstorm', '⛈️'], 99: ['Thunderstorm', '⛈️'],
+};
+async function findCity(city) {
+  const g = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=en&format=json`);
+  return g && g.results && g.results[0];
+}
+app.get('/api/weather', async (req, res) => {
+  const city = cleanQ(req.query.city);
+  if (city.length < 2) return res.json({ error: 'Type your city' });
+  try {
+    const out = await cached(`w:${city.toLowerCase()}`, 20 * 60 * 1000, async () => {
+      const c = await findCity(city);
+      if (!c) return { error: 'City not found' };
+      const w = await getJson(`https://api.open-meteo.com/v1/forecast?latitude=${c.latitude}&longitude=${c.longitude}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5`);
+      const cur = w.current || {};
+      const [text, icon] = WEATHER_CODES[cur.weather_code] || ['Weather', '🌡️'];
+      const d = w.daily || {};
+      return {
+        city: c.name, country: c.country, temp: Math.round(cur.temperature_2m), feels: Math.round(cur.apparent_temperature),
+        humidity: cur.relative_humidity_2m, wind: Math.round(cur.wind_speed_10m), text, icon,
+        days: (d.time || []).map((t, i) => ({ date: t, max: Math.round(d.temperature_2m_max[i]), min: Math.round(d.temperature_2m_min[i]), icon: (WEATHER_CODES[d.weather_code[i]] || ['', '🌡️'])[1] })),
+      };
+    });
+    res.json(out);
+  } catch {
+    res.json({ error: 'Weather is not available right now' });
+  }
+});
+
+// ---------- Prayer times + Hijri date (Aladhan, free) ----------
+app.get('/api/prayer', async (req, res) => {
+  const city = cleanQ(req.query.city);
+  if (city.length < 2) return res.json({ error: 'Type your city' });
+  try {
+    const out = await cached(`p:${city.toLowerCase()}:${new Date().toISOString().slice(0, 10)}`, 3 * 60 * 60 * 1000, async () => {
+      const c = await findCity(city);
+      if (!c) return { error: 'City not found' };
+      const j = await getJson(`https://api.aladhan.com/v1/timings?latitude=${c.latitude}&longitude=${c.longitude}&method=${c.country_code === 'IN' ? 1 : 4}`);
+      const t = (j.data && j.data.timings) || {};
+      const h = j.data && j.data.date && j.data.date.hijri;
+      return {
+        city: c.name,
+        times: ['Fajr', 'Sunrise', 'Dhuhr', 'Asr', 'Maghrib', 'Isha'].map(n => ({ name: n, time: String(t[n] || '').slice(0, 5) })),
+        hijri: h ? `${h.day} ${h.month && h.month.en} ${h.year} AH` : '',
+      };
+    });
+    res.json(out);
+  } catch {
+    res.json({ error: 'Prayer times are not available right now' });
+  }
+});
+
+// ---------- Live scores (cricket + football) ----------
+async function cricketScores() {
+  const feed = await parser.parseURL('https://static.cricinfo.com/rss/livescores.xml');
+  return (feed.items || []).slice(0, 15).map(it => ({ title: stripHtml(it.title || ''), link: it.link, sport: 'cricket' }));
+}
+async function footballScores() {
+  const leagues = ['eng.1', 'esp.1', 'uefa.champions', 'ita.1', 'ger.1', 'ind.1'];
+  const out = [];
+  await Promise.all(leagues.map(async lg => {
+    try {
+      const j = await getJson(`https://site.api.espn.com/apis/site/v2/sports/soccer/${lg}/scoreboard`);
+      for (const ev of j.events || []) {
+        const comp = (ev.competitions || [])[0] || {};
+        const teams = (comp.competitors || []).map(c => `${(c.team && (c.team.shortDisplayName || c.team.displayName)) || ''} ${c.score ?? ''}`.trim());
+        const st = (ev.status && ev.status.type) || {};
+        out.push({ title: teams.join('  –  '), status: st.shortDetail || st.description || '', live: st.state === 'in', league: (j.leagues && j.leagues[0] && j.leagues[0].abbreviation) || lg, sport: 'football', date: ev.date });
+      }
+    } catch { }
+  }));
+  out.sort((a, b) => Number(b.live) - Number(a.live) || String(a.date).localeCompare(String(b.date)));
+  return out.slice(0, 25);
+}
+app.get('/api/scores', async (req, res) => {
+  const out = await cached('scores', 2 * 60 * 1000, async () => {
+    const [cricket, football] = await Promise.all([cricketScores().catch(() => []), footballScores().catch(() => [])]);
+    return { cricket, football, at: new Date().toISOString() };
+  });
+  res.json(out);
+});
+
+// ---------- Trailers (newest official trailers) ----------
+app.get('/api/trailers', async (req, res) => {
+  const lang = { te: 'telugu', hi: 'hindi', en: 'english', ta: 'tamil', ml: 'malayalam', kn: 'kannada' }[String(req.query.lang || 'te')] || 'telugu';
+  try {
+    const items = await cached(`tr:${lang}`, 3 * 60 * 60 * 1000, async () => {
+      const list = await youtubeSearch(`${lang} movie official trailer ${new Date().getFullYear()}`, false);
+      return list.filter(a => /trailer|teaser|glimpse/i.test(a.title)).slice(0, 30).map(a => ({ ...a, category: 'Movies' }));
+    });
+    res.json({ items });
+  } catch {
+    res.json({ items: [] });
+  }
+});
+
+// ---------- Memes (Lemmy meme communities, safe only) ----------
+app.get('/api/memes', async (req, res) => {
+  try {
+    const items = await cached('memes', 30 * 60 * 1000, async () => {
+      const out = [];
+      for (const c of ['memes@lemmy.ml', 'memes@lemmy.world', 'wholesomememes@lemmy.world']) {
+        try {
+          const j = await getJson(`https://lemmy.world/api/v3/post/list?community_name=${encodeURIComponent(c)}&sort=Hot&limit=30`);
+          for (const pv of j.posts || []) {
+            const p = pv.post || {};
+            if (!p.url || p.nsfw || p.removed || p.deleted || !/\.(jpe?g|png|webp|gif)(\?|$)/i.test(p.url) || !safeText(p.name)) continue;
+            out.push({ id: `meme-${p.id}`, title: firstLine(p.name), imageUrl: p.url, thumbUrl: p.thumbnail_url || p.url, link: p.ap_id, source: c.split('@')[0], provider: 'lemmy', type: 'photo', credit: `From c/${c} on Lemmy` });
+          }
+        } catch { }
+      }
+      return shuffle(out).slice(0, 60);
+    });
+    res.json({ items });
+  } catch {
+    res.json({ items: [] });
+  }
+});
+
+// ---------- Translate (free Google endpoint) ----------
+app.post('/api/translate', async (req, res) => {
+  const text = String((req.body && req.body.text) || '').slice(0, 1500);
+  const to = /^[a-z]{2}(-[A-Z]{2})?$/.test(String(req.body && req.body.to)) ? req.body.to : 'en';
+  if (!text.trim()) return res.json({ text: '' });
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests. Please wait a minute.' });
+  try {
+    const out = await cached(`tr:${to}:${md5(text)}`, 24 * 60 * 60 * 1000, async () => {
+      const j = await getJson(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${to}&dt=t&q=${encodeURIComponent(text)}`);
+      return { text: (j[0] || []).map(p => p[0]).join(''), from: j[2] || '' };
+    });
+    res.json(out);
+  } catch {
+    res.json({ error: 'Translate is not available right now' });
+  }
+});
+
 app.listen(process.env.PORT || 4000, '0.0.0.0', () => console.log('CIVIX server running'));
