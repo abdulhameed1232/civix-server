@@ -3046,6 +3046,103 @@ app.get('/api/podcasts/episodes', async (req, res) => {
   }
 });
 
+// ============================================================
+// 🔔 Daily CIVIX notifications (part22.sql) – 3 or 4 a day, each one only once a day.
+// Times (UTC): 05:00 goals · 09:30 news · 14:00 quiz · 17:00 "your day" (only if you got likes/comments).
+// That is 9:00 / 13:30 / 18:00 / 21:00 in Dubai (10:30 / 15:00 / 19:30 / 22:30 in India).
+// Anyone can turn them off: Profile → Settings → Daily notifications.
+// ============================================================
+const DAILY_SLOTS = [
+  { slot: 'goals', h: 5, m: 0 },
+  { slot: 'news', h: 9, m: 30 },
+  { slot: 'quiz', h: 14, m: 0 },
+  { slot: 'digest', h: 17, m: 0 },
+];
+const GOAL_TIPS = [
+  'Plan your day: add 3 goals to your CIVIX To-do ✅',
+  'Today’s goals: answer the daily quiz 🧠, catch up on news 📰, say hi to a friend 👋',
+  'New day! Write down what you want to finish today ✍️',
+  'Small steps: pick ONE goal for today and tick it off ✅',
+  'Check today’s weather and plan your day ☀️',
+];
+async function claimSlot(day, slot) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/daily_push_log?on_conflict=day,slot`, {
+    method: 'POST',
+    headers: dbHeaders({ Prefer: 'resolution=ignore-duplicates,return=representation' }),
+    body: JSON.stringify({ day, slot }),
+  });
+  if (!r.ok) return false; // part22.sql not run yet
+  const rows = await r.json().catch(() => []);
+  return Array.isArray(rows) && rows.length > 0; // empty = already sent today
+}
+async function rpcAsServer(name) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, { method: 'POST', headers: dbHeaders(), body: '{}' });
+  if (!r.ok) return [];
+  return r.json().catch(() => []);
+}
+async function sendDaily(slot) {
+  if (slot === 'digest') {
+    const rows = await rpcAsServer('daily_digest_targets');
+    const msgs = rows.map(x => {
+      const parts = [];
+      if (x.likes) parts.push(`${x.likes} ${x.likes === 1 ? 'like' : 'likes'} ❤️`);
+      if (x.comments) parts.push(`${x.comments} ${x.comments === 1 ? 'comment' : 'comments'} 💬`);
+      return { to: x.token, sound: 'default', priority: 'high', channelId: 'messages', title: 'Your day on CIVIX', body: `Your posts got ${parts.join(' and ')} today. See who!`, data: { type: 'daily', open: 'activity' } };
+    });
+    for (let i = 0; i < msgs.length; i += 90) await sendExpoPush(msgs.slice(i, i + 90), 'daily');
+    return msgs.length;
+  }
+  let title = '', body = '', open = 'hub';
+  if (slot === 'goals') {
+    const day = Math.floor(Date.now() / 86400000);
+    title = '☀️ Good morning!';
+    body = GOAL_TIPS[day % GOAL_TIPS.length];
+    open = 'todo';
+  } else if (slot === 'news') {
+    let top = null;
+    try { top = (await newsSearch('UAE OR Dubai', 'en', 'AE'))[0]; } catch { }
+    if (!top) return 0;
+    title = '📰 Today’s news';
+    body = top.title;
+    open = 'hub';
+  } else if (slot === 'quiz') {
+    title = '🧠 Today’s quiz is ready';
+    body = '5 quick questions – can you get them all right? See the leaderboard!';
+    open = 'quiz';
+  }
+  const rows = await rpcAsServer('daily_push_targets');
+  const seen = new Set();
+  const msgs = rows.filter(x => !seen.has(x.token) && seen.add(x.token)).map(x => ({ to: x.token, sound: 'default', priority: 'normal', channelId: 'messages', title, body, data: { type: 'daily', open } }));
+  for (let i = 0; i < msgs.length; i += 90) await sendExpoPush(msgs.slice(i, i + 90), 'daily');
+  return msgs.length;
+}
+async function runDaily() {
+  if (!SUPABASE_SECRET_KEY) return;
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+  const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  for (const s of DAILY_SLOTS) {
+    const at = s.h * 60 + s.m;
+    if (mins < at || mins > at + 50) continue; // only in its time window (not hours later after a restart)
+    try {
+      if (!(await claimSlot(day, s.slot))) continue;
+      const n = await sendDaily(s.slot);
+      console.log(`Daily ${s.slot}: sent to ${n}`);
+    } catch (e) {
+      console.log(`Daily ${s.slot} error:`, e.message);
+    }
+  }
+}
+setInterval(runDaily, 5 * 60 * 1000);
+setTimeout(runDaily, 90 * 1000);
+// Render's free plan sleeps after 15 minutes without visitors – then the daily notifications and
+// automatic channels would stop. A small visit to ourselves every 10 minutes keeps the server awake.
+if (process.env.RENDER_EXTERNAL_URL) {
+  setInterval(() => {
+    fetch(process.env.RENDER_EXTERNAL_URL).catch(() => { });
+  }, 10 * 60 * 1000);
+}
+
 // Never show error details to visitors
 app.use((err, req, res, next) => {
   console.log('Server error:', err && err.message);
