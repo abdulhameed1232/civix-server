@@ -2090,21 +2090,23 @@ async function sendExpoPush(messages, label) {
 
 
 // ---------- WhatsApp-style calls (part18.sql): which phones show the ringing call screen themselves ----------
-let callPushCfg = { at: 0, full: false };
-async function fullCallOn() {
+let callPushCfg = { at: 0, full: false, msg: false };
+async function fullCallOn(kind = 'call') {
   if (!SUPABASE_SECRET_KEY) return false;
-  if (Date.now() - callPushCfg.at < 60 * 1000) return callPushCfg.full;
-  try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_config?key=eq.call_push&select=value`, { headers: dbHeaders() });
-    const j = r.ok ? await r.json() : [];
-    callPushCfg = { at: Date.now(), full: !!(j[0] && j[0].value && j[0].value.full) };
-  } catch {
-    callPushCfg = { at: Date.now(), full: false };
+  if (Date.now() - callPushCfg.at > 60 * 1000) {
+    try {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/app_config?key=in.(call_push,message_push)&select=key,value`, { headers: dbHeaders() });
+      const j = r.ok ? await r.json() : [];
+      const get = k => (j.find(x => x.key === k) || {}).value || {};
+      callPushCfg = { at: Date.now(), full: !!get('call_push').full, msg: !!get('message_push').full };
+    } catch {
+      callPushCfg = { at: Date.now(), full: false, msg: false };
+    }
   }
-  return callPushCfg.full;
+  return kind === 'message' ? callPushCfg.msg : callPushCfg.full;
 }
-async function fullCallTokens(tokens) {
-  if (!tokens.length || !(await fullCallOn())) return new Set();
+async function fullCallTokens(tokens, kind = 'call') {
+  if (!tokens.length || !(await fullCallOn(kind))) return new Set();
   try {
     const list = tokens.map(t => `"${String(t).replace(/"/g, '')}"`).join(',');
     const r = await fetch(`${SUPABASE_URL}/rest/v1/push_tokens?select=token&full_call=is.true&token=in.(${encodeURIComponent(list)})`, { headers: dbHeaders() });
@@ -2192,8 +2194,11 @@ app.post('/api/notify', async (req, res) => {
       return res.json({ sent: 0 });
     }
 
-    const full = type === 'call' ? await fullCallTokens(rows.map(x => x.token)) : new Set();
-    const messages = rows.slice(0, 20).map(x => full.has(x.token) ? silentCall(x.token, { type: 'call', ref: x.ref, title: x.title, body: x.body }) : ({
+    const full = type === 'call' || type === 'message' ? await fullCallTokens(rows.map(x => x.token), type) : new Set();
+    // Phones that unlock messages themselves get a silent signal (the message is opened on the phone, not here)
+    const messages = rows.slice(0, 20).map(x => full.has(x.token)
+      ? silentCall(x.token, type === 'call' ? { type: 'call', ref: x.ref, title: x.title, body: x.body } : { type: 'message', ref: x.ref, mid: id, title: x.title })
+      : ({
       to: x.token,
       title: x.title,
       body: x.body,
