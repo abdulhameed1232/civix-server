@@ -2794,6 +2794,207 @@ async function sendDueMessages() {
 }
 setInterval(sendDueMessages, 60 * 1000);
 
+// ============================================================
+// 📢 Automatic channels (part17.sql): the server posts news, football results,
+// memes and the Dubai weather into official CIVIX channels. Needs SUPABASE_SECRET_KEY.
+// Only headlines + a link to the original site are posted (never full articles).
+// ============================================================
+function dbHeaders(extra = {}) {
+  const h = { apikey: SUPABASE_SECRET_KEY, 'Content-Type': 'application/json', ...extra };
+  if (SUPABASE_SECRET_KEY.startsWith('eyJ')) h.Authorization = `Bearer ${SUPABASE_SECRET_KEY}`;
+  return h;
+}
+const AUTO_CHANNELS = {
+  'civix.uae.news': { everyMin: 180, max: 3, make: () => newsSearch('UAE OR Dubai', 'en', 'AE').then(list => list.map(newsPost)) },
+  'civix.india.news': { everyMin: 180, max: 3, make: () => newsSearch('India', 'en', 'IN').then(list => list.map(newsPost)) },
+  'civix.football': { everyMin: 60, max: 4, make: footballResults },
+  'civix.memes': { everyMin: 240, max: 1, make: memePosts },
+  'civix.weather': { everyMin: 30, max: 1, make: weatherPost },
+};
+const autoLast = {};
+const autoToday = {}; // handle -> { day, n }
+function newsPost(n) {
+  return { key: `news:${n.id}`, body: `${n.title}\n\n— ${n.source}`, link_url: n.link };
+}
+async function footballResults() {
+  const leagues = ['eng.1', 'esp.1', 'uefa.champions', 'ita.1', 'ger.1', 'ind.1'];
+  const out = [];
+  await Promise.all(leagues.map(async lg => {
+    try {
+      const j = await getJson(`https://site.api.espn.com/apis/site/v2/sports/soccer/${lg}/scoreboard`);
+      const league = (j.leagues && j.leagues[0] && (j.leagues[0].name || j.leagues[0].abbreviation)) || lg;
+      for (const ev of j.events || []) {
+        const st = (ev.status && ev.status.type) || {};
+        if (st.state !== 'post' || !ev.id) continue;
+        const comp = (ev.competitions || [])[0] || {};
+        const t = (comp.competitors || []).map(c => `${(c.team && (c.team.displayName || c.team.shortDisplayName)) || ''} ${c.score ?? ''}`.trim());
+        if (t.length !== 2) continue;
+        out.push({ key: `fb:${ev.id}`, body: `⚽ Full time · ${league}\n\n${t[0]}  –  ${t[1]}`, at: ev.date });
+      }
+    } catch { }
+  }));
+  out.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  return out;
+}
+async function memePosts() {
+  const photos = (more.lemmy && more.lemmy.photos) || [];
+  return photos
+    .filter(p => /meme|funny|humor|humour|comic|jokes/i.test(`${p.source} ${p.category}`) && /^https:\/\//.test(p.imageUrl || ''))
+    .sort((a, b) => (b.likes || 0) - (a.likes || 0))
+    .map(p => ({ key: `meme:${p.id}`, body: `${p.title}\n\n📌 ${p.credit}`, media_url: p.imageUrl, media_type: 'image', link_url: p.link }));
+}
+const WMO = { 0: '☀️ Clear sky', 1: '🌤️ Mostly clear', 2: '⛅ Partly cloudy', 3: '☁️ Cloudy', 45: '🌫️ Fog', 48: '🌫️ Fog', 51: '🌦️ Light drizzle', 53: '🌦️ Drizzle', 55: '🌦️ Drizzle', 61: '🌧️ Light rain', 63: '🌧️ Rain', 65: '🌧️ Heavy rain', 80: '🌦️ Showers', 81: '🌧️ Showers', 82: '⛈️ Heavy showers', 95: '⛈️ Thunderstorm', 96: '⛈️ Thunderstorm', 99: '⛈️ Thunderstorm' };
+async function weatherPost() {
+  const now = new Date(Date.now() + 4 * 3600 * 1000); // Dubai time
+  if (now.getUTCHours() < 7) return []; // post once a day, after 7 am Dubai time
+  const day = now.toISOString().slice(0, 10);
+  const j = await getJson('https://api.open-meteo.com/v1/forecast?latitude=25.2048&longitude=55.2708&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max&timezone=Asia%2FDubai&forecast_days=1');
+  const d = j.daily || {};
+  if (!d.time) return [];
+  const code = (d.weather_code || [])[0];
+  const uv = Math.round((d.uv_index_max || [])[0] || 0);
+  return [{
+    key: `weather:${day}`,
+    body: `Good morning, Dubai! ☀️\n\n${WMO[code] || '🌡️ Today'}\n🌡️ ${Math.round(d.temperature_2m_min[0])}° – ${Math.round(d.temperature_2m_max[0])}°C\n☔ Rain chance: ${(d.precipitation_probability_max || [0])[0] ?? 0}%\n🕶️ UV index: ${uv}${uv >= 8 ? ' – very high, use sunscreen' : ''}\n\nData: Open-Meteo`,
+  }];
+}
+async function runAutoChannels() {
+  if (!SUPABASE_SECRET_KEY) return;
+  try {
+    const handles = Object.keys(AUTO_CHANNELS);
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/channels?select=id,handle,owner_id&handle=in.(${handles.join(',')})`, { headers: dbHeaders() });
+    if (!r.ok) return; // part17.sql not run yet
+    const rows = await r.json();
+    for (const ch of rows) {
+      const cfg = AUTO_CHANNELS[ch.handle];
+      if (!cfg || (autoLast[ch.handle] && Date.now() - autoLast[ch.handle] < cfg.everyMin * 60 * 1000)) continue;
+      autoLast[ch.handle] = Date.now();
+      const day = new Date().toISOString().slice(0, 10);
+      const count = autoToday[ch.handle] && autoToday[ch.handle].day === day ? autoToday[ch.handle] : (autoToday[ch.handle] = { day, n: 0 });
+      let items = [];
+      try { items = await cfg.make(); } catch (e) { console.log(`Auto channel ${ch.handle}:`, e.message); continue; }
+      let posted = 0;
+      for (const it of items) {
+        if (posted >= cfg.max || count.n >= 24) break;
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/channel_posts?on_conflict=channel_id,source_key`, {
+          method: 'POST',
+          headers: dbHeaders({ Prefer: 'resolution=ignore-duplicates,return=representation' }),
+          body: JSON.stringify({
+            channel_id: ch.id, author_id: ch.owner_id, source_key: it.key,
+            body: String(it.body || '').slice(0, 1900), link_url: it.link_url || null,
+            media_url: it.media_url || null, media_type: it.media_type || null,
+          }),
+        });
+        if (!res.ok) break;
+        const made = await res.json().catch(() => []);
+        if (Array.isArray(made) && made.length) { posted++; count.n++; } // already-posted items return nothing
+      }
+      if (posted) console.log(`Auto channel ${ch.handle}: ${posted} new`);
+    }
+  } catch (e) {
+    console.log('Auto channels error:', e.message);
+  }
+}
+setTimeout(runAutoChannels, 60 * 1000);
+setInterval(runAutoChannels, 10 * 60 * 1000);
+
+// ============================================================
+// 🎧 Podcasts: like Spotify / Apple Podcasts. Podcasts are published by their creators as public
+// RSS feeds for podcast apps. We find them with Apple's free podcast directory and play the
+// episodes straight from the creator's own host (so the creator still gets the listen).
+// ============================================================
+const POD_COUNTRIES = ['ae', 'in', 'us', 'gb'];
+function podShow(r) {
+  return {
+    id: String(r.collectionId || r.id),
+    name: r.collectionName || r.name || '',
+    author: r.artistName || '',
+    art: r.artworkUrl600 || r.artworkUrl100 || '',
+    genre: r.primaryGenreName || ((r.genres && r.genres[0] && (r.genres[0].name || r.genres[0])) || ''),
+    count: r.trackCount || null,
+  };
+}
+async function podLookup(ids) {
+  const j = await getJson(`https://itunes.apple.com/lookup?entity=podcast&id=${ids.join(',')}`);
+  return (j.results || []).filter(r => r.kind === 'podcast' || r.wrapperType === 'track');
+}
+app.get('/api/podcasts/top', async (req, res) => {
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests' });
+  const cc = POD_COUNTRIES.includes(String(req.query.country)) ? String(req.query.country) : 'ae';
+  try {
+    const shows = await cached(`pod-top:${cc}`, 6 * 60 * 60 * 1000, async () => {
+      let top;
+      try {
+        top = await getJson(`https://rss.marketingtools.apple.com/api/v2/${cc}/podcasts/top/50/podcasts.json`);
+      } catch {
+        top = await getJson(`https://rss.applemarketingtools.com/api/v2/${cc}/podcasts/top/50/podcasts.json`);
+      }
+      const ids = ((top.feed && top.feed.results) || []).map(r => r.id).filter(Boolean).slice(0, 50);
+      if (!ids.length) return [];
+      const full = await podLookup(ids);
+      const byId = new Map(full.map(r => [String(r.collectionId), r]));
+      return ids.map(id => byId.get(String(id))).filter(r => r && r.feedUrl && r.collectionExplicitness !== 'explicit').map(podShow);
+    });
+    res.json({ shows });
+  } catch (e) {
+    res.status(502).json({ error: 'Podcasts are not available right now' });
+  }
+});
+app.get('/api/podcasts/search', async (req, res) => {
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests' });
+  const q = String(req.query.q || '').trim().slice(0, 80);
+  if (!q) return res.json({ shows: [] });
+  try {
+    const shows = await cached(`pod-q:${q.toLowerCase()}`, 60 * 60 * 1000, async () => {
+      const j = await getJson(`https://itunes.apple.com/search?media=podcast&entity=podcast&limit=30&term=${encodeURIComponent(q)}`);
+      return (j.results || []).filter(r => r.feedUrl && r.collectionExplicitness !== 'explicit').map(podShow);
+    });
+    res.json({ shows });
+  } catch {
+    res.status(502).json({ error: 'Search is not available right now' });
+  }
+});
+function podSeconds(d) {
+  if (!d) return null;
+  const s = String(d).trim();
+  if (/^\d+$/.test(s)) return Number(s);
+  const p = s.split(':').map(Number);
+  if (p.some(isNaN)) return null;
+  return p.reduce((a, b) => a * 60 + b, 0);
+}
+app.get('/api/podcasts/episodes', async (req, res) => {
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests' });
+  const id = String(req.query.id || '');
+  if (!/^\d{3,15}$/.test(id)) return res.status(400).json({ error: 'Bad podcast id' });
+  try {
+    const out = await cached(`pod-ep:${id}`, 60 * 60 * 1000, async () => {
+      const [show] = await podLookup([id]);
+      if (!show || !show.feedUrl) return { error: 'Podcast not found' };
+      if (show.collectionExplicitness === 'explicit') return { error: 'This podcast is for adults only' };
+      const u = new URL(show.feedUrl);
+      if (!/^https?:$/.test(u.protocol) || /^(localhost|127\.|10\.|192\.168\.|169\.254\.|\[)/i.test(u.hostname)) return { error: 'Podcast not found' };
+      const feed = await parser.parseURL(show.feedUrl);
+      const episodes = (feed.items || [])
+        .filter(it => it.enclosure && it.enclosure.url && /^https?:\/\//.test(it.enclosure.url) && !/^(yes|true|explicit)$/i.test(String((it.itunes && it.itunes.explicit) || '')))
+        .slice(0, 60)
+        .map(it => ({
+          id: md5(`ep:${it.guid || it.enclosure.url}`),
+          title: stripHtml(it.title || '').slice(0, 200),
+          about: stripHtml(it.contentSnippet || (it.itunes && it.itunes.summary) || '').slice(0, 400),
+          url: it.enclosure.url.replace(/^http:\/\//, 'https://'),
+          date: new Date(it.isoDate || it.pubDate || Date.now()).toISOString(),
+          secs: podSeconds(it.itunes && it.itunes.duration),
+          art: (it.itunes && it.itunes.image) || null,
+        }));
+      return { show: { ...podShow(show), about: stripHtml((feed.description || '')).slice(0, 600), link: feed.link || show.collectionViewUrl || null }, episodes };
+    });
+    if (out.error) return res.status(404).json(out);
+    res.json(out);
+  } catch (e) {
+    res.status(502).json({ error: 'Could not load this podcast right now' });
+  }
+});
+
 // Never show error details to visitors
 app.use((err, req, res, next) => {
   console.log('Server error:', err && err.message);
