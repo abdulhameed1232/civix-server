@@ -2960,6 +2960,64 @@ function mealOut(m) {
   }
   return { id: m.idMeal, name: m.strMeal, area: m.strArea, category: m.strCategory, image: m.strMealThumb, ingredients: ing, steps: String(m.strInstructions || '').slice(0, 4000), video: m.strYoutube || null, source: m.strSource || null };
 }
+// ---------- 🙏 Festivals (Google's public holiday calendars) ----------
+// The app downloads ALL festivals and keeps only the faith the person picked ON THEIR PHONE.
+// So the server never learns anyone's religion.
+const FESTIVAL_CALS = [
+  'https://calendar.google.com/calendar/ical/en.indian%23holiday%40group.v.calendar.google.com/public/basic.ics',
+  'https://calendar.google.com/calendar/ical/en.christian%23holiday%40group.v.calendar.google.com/public/basic.ics',
+];
+const FAITH_WORDS = {
+  islam: ['eid', 'muharram', 'ashura', 'milad', 'ramadan', 'ramzan', 'bakrid', 'bakri', 'shab', 'islamic new year', 'hijri', 'isra', 'miraj', 'jamat ul-vida', 'jamat-ul-vida'],
+  hindu: ['diwali', 'deepavali', 'holi', 'janmashtami', 'ganesh', 'navratri', 'navaratri', 'dussehra', 'dasara', 'vijaya dashami', 'raksha', 'rakhi', 'shivaratri', 'shivratri', 'rama navami', 'ram navami', 'pongal', 'sankranti', 'onam', 'durga', 'chhath', 'karva', 'karaka', 'govardhan', 'bhai duj', 'bhai dooj', 'dhanteras', 'ugadi', 'gudi padwa', 'vasant panchami', 'basant panchami', 'hanuman', 'maha navami', 'maha saptami', 'maha ashtami', 'lakshmi', 'kali puja', 'akshaya', 'guru purnima', 'naraka chaturdasi', 'chaitra', 'vishu', 'rath yatra', 'ratha yathra', 'ganga'],
+  christian: ['christmas', 'good friday', 'easter', 'ash wednesday', 'palm sunday', 'maundy', 'holy saturday', 'all saints', 'all souls', 'ascension', 'pentecost', 'epiphany', 'lent', 'advent'],
+  sikh: ['guru nanak', 'guru gobind', 'vaisakhi', 'baisakhi', 'lohri', 'guru tegh', 'guru arjan', 'hola mohalla', 'gurpurab'],
+};
+function faithOf(name) {
+  const n = name.toLowerCase();
+  for (const [f, words] of Object.entries(FAITH_WORDS)) if (words.some(w => n.includes(w))) return f;
+  return null;
+}
+function parseIcs(text) {
+  const out = [];
+  const unfolded = text.replace(/\r?\n[ \t]/g, '');
+  for (const block of unfolded.split('BEGIN:VEVENT').slice(1)) {
+    const d = (block.match(/DTSTART[^:]*:(\d{8})/) || [])[1];
+    const name = ((block.match(/\nSUMMARY[^:]*:(.*)/) || [])[1] || '').replace(/\\,/g, ',').replace(/\\n/g, ' ').trim();
+    if (d && name) out.push({ date: `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`, name });
+  }
+  return out;
+}
+app.get('/api/festivals', async (req, res) => {
+  try {
+    const list = await cached(`festivals:${new Date().toISOString().slice(0, 10)}`, 12 * 60 * 60 * 1000, async () => {
+      const today = new Date(Date.now() + 4 * 3600 * 1000).toISOString().slice(0, 10);
+      const until = new Date(Date.now() + 120 * 86400 * 1000).toISOString().slice(0, 10);
+      const all = [];
+      const seen = new Set();
+      for (const url of FESTIVAL_CALS) {
+        try {
+          const r = await fetch(url, { headers: { 'User-Agent': 'CIVIX/1.0' } });
+          if (!r.ok) continue;
+          for (const e of parseIcs(await r.text())) {
+            const faith = faithOf(e.name);
+            const key = `${e.date}|${e.name.toLowerCase()}`;
+            if (!faith || e.date < today || e.date > until || seen.has(key)) continue;
+            seen.add(key);
+            all.push({ ...e, faith });
+          }
+        } catch { }
+      }
+      if (!all.length) throw new Error('no festivals'); // don't remember an empty list
+      return all.sort((a, b) => a.date.localeCompare(b.date));
+    });
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json({ festivals: list });
+  } catch (e) {
+    res.json({ festivals: [], error: 'Festivals are not available right now.' });
+  }
+});
+
 app.get('/api/recipe/today', async (req, res) => {
   if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests' });
   const day = new Date().toISOString().slice(0, 10);
@@ -3263,7 +3321,7 @@ async function sendDaily(slot) {
     for (let i = 0; i < msgs.length; i += 90) await sendExpoPush(msgs.slice(i, i + 90), 'daily');
     return msgs.length;
   }
-  let title = '', body = '', open = 'hub';
+  let title = '', body = '', open = 'hub', article = null;
   if (slot === 'goals') {
     const day = Math.floor(Date.now() / 86400000);
     title = '☀️ Good morning!';
@@ -3275,7 +3333,12 @@ async function sendDaily(slot) {
     if (!top) return 0;
     title = '📰 Today’s news';
     body = top.title;
-    open = 'hub';
+    open = 'news';
+    // The story itself goes with the notification, so a tap opens THAT story
+    article = {
+      id: top.id, title: top.title, link: top.link, source: top.source, imageUrl: top.imageUrl || null,
+      publishedAt: top.publishedAt, description: String(top.description || '').slice(0, 300), language: top.language || 'en', category: top.category || 'News',
+    };
   } else if (slot === 'quiz') {
     title = '🧠 Today’s quiz is ready';
     body = '5 quick questions – can you get them all right? See the leaderboard!';
@@ -3283,7 +3346,7 @@ async function sendDaily(slot) {
   }
   const rows = await rpcAsServer('daily_push_targets');
   const seen = new Set();
-  const msgs = rows.filter(x => !seen.has(x.token) && seen.add(x.token)).map(x => ({ to: x.token, sound: 'default', priority: 'normal', channelId: 'messages', title, body, data: { type: 'daily', open } }));
+  const msgs = rows.filter(x => !seen.has(x.token) && seen.add(x.token)).map(x => ({ to: x.token, sound: 'default', priority: 'normal', channelId: 'messages', title, body, data: article ? { type: 'daily', open, article } : { type: 'daily', open } }));
   for (let i = 0; i < msgs.length; i += 90) await sendExpoPush(msgs.slice(i, i + 90), 'daily');
   return msgs.length;
 }
