@@ -2194,7 +2194,24 @@ app.post('/api/notify', async (req, res) => {
       return res.json({ sent: 0 });
     }
 
-    const full = type === 'call' || type === 'message' ? await fullCallTokens(rows.map(x => x.token), type) : new Set();
+    // Calls: ring EVERY phone straight away with a normal call notification (fastest),
+    // then also wake CIVIX on phones that can show the looping ringtone (it replaces the first one)
+    if (type === 'call') {
+      const now = rows.slice(0, 20).map(x => ({
+        to: x.token, title: x.title, body: x.body, sound: 'default', priority: 'high', channelId: 'calls_ring',
+        data: { type, ref: x.ref }, categoryId: 'call', ttl: 60,
+      }));
+      await sendExpoPush(now, type);
+      res.json({ sent: now.length });
+      fullCallTokens(rows.map(x => x.token), 'call')
+        .then(full => {
+          const wake = rows.filter(x => full.has(x.token)).slice(0, 20).map(x => silentCall(x.token, { type: 'call', ref: x.ref, title: x.title, body: x.body }));
+          if (wake.length) return sendExpoPush(wake, 'call');
+        })
+        .catch(() => { });
+      return;
+    }
+    const full = type === 'message' ? await fullCallTokens(rows.map(x => x.token), type) : new Set();
     // Phones that unlock messages themselves get a silent signal (the message is opened on the phone, not here)
     const messages = rows.slice(0, 20).map(x => full.has(x.token)
       ? silentCall(x.token, type === 'call' ? { type: 'call', ref: x.ref, title: x.title, body: x.body } : { type: 'message', ref: x.ref, mid: id, title: x.title })
@@ -2818,6 +2835,160 @@ app.post('/api/translate', async (req, res) => {
 });
 
 // ---------- Profile links: https://…/u/<username> (opens CIVIX if installed) ----------
+// ============================================================
+// 📄 Privacy Policy & Terms of Use – public pages (link them in Reddit, app stores, Google)
+//    https://civix-server-c961.onrender.com/privacy   and   /terms
+// Contact email: set CONTACT_EMAIL in Render → Environment to change it.
+// ============================================================
+const CONTACT_EMAIL = process.env.CONTACT_EMAIL || 'abdulbpdc@gmail.com';
+function legalPage(title, body) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title} · CIVIX</title><style>
+body{margin:0;background:#000;color:#eee;font:16px/1.65 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
+main{max-width:760px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:30px;margin:0 0 4px;background:linear-gradient(90deg,#FF8A00,#FF2D78,#7B2FF7);-webkit-background-clip:text;color:transparent}
+h2{font-size:19px;margin:28px 0 6px;color:#fff}.muted{color:#999;font-size:14px}a{color:#FF5C9A}
+li{margin:4px 0}.box{background:#121214;border:1px solid #2a2a30;border-radius:14px;padding:14px 16px;margin:16px 0}
+</style></head><body><main>${body}</main></body></html>`;
+}
+const UPDATED = '12 November 2026';
+app.get('/privacy', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.send(legalPage('Privacy Policy', `
+<h1>CIVIX Privacy Policy</h1><p class="muted">Last updated: ${UPDATED} · <a href="/terms">Terms of Use</a></p>
+<div class="box"><b>In short:</b> we collect only what CIVIX needs to work. Your chats and calls are end-to-end encrypted – we cannot read or hear them. We never sell your data and we show no ads. You can delete your account and data at any time.</div>
+<h2>1. Who we are</h2>
+<p>CIVIX is a social app made by Abdul Hameed (Dubai, UAE). Contact for privacy questions, requests and complaints (grievance contact): <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a>.</p>
+<h2>2. What we collect</h2>
+<ul>
+<li><b>Account:</b> email address, @username, display name, password (stored scrambled by our login provider), and whether your account is private or public.</li>
+<li><b>Profile & posts you choose to share:</b> photo, bio, posts, stories, reels, comments, likes, follows, channels, polls and similar.</li>
+<li><b>Messages:</b> sent end-to-end encrypted. Our servers store only scrambled text and files they cannot read, plus basic delivery data (who, which chat, when, delivered/seen).</li>
+<li><b>Calls:</b> end-to-end encrypted when both phones support it. Calls are <b>never recorded</b>. We keep a call log (who, when, how long).</li>
+<li><b>Device data:</b> a push-notification token so we can send you notifications, and anonymous crash/quality reports (no message contents).</li>
+<li><b>Location:</b> only if you tap “Use my location” for weather/prayer times. It stays on your phone and is not stored by us. Off by default.</li>
+<li><b>On your phone only:</b> things like your to-do list, diary, podcast progress, reel interests and settings stay on your device.</li>
+</ul>
+<h2>3. Why we use it</h2>
+<ul><li>To run CIVIX: your account, feed, messages, calls, notifications and safety features.</li>
+<li>To keep CIVIX safe: stop spam and abuse, handle reports, fix errors.</li>
+<li>To show reels and posts you are more likely to enjoy (based on what you watch and like inside CIVIX).</li></ul>
+<p>We do <b>not</b> sell your data, we do <b>not</b> show ads, and we do <b>not</b> use your data to train AI.</p>
+<h2>4. Who else handles data (our service providers)</h2>
+<ul><li><b>Supabase</b> – database, login and file storage.</li><li><b>Render</b> – our server.</li><li><b>LiveKit</b> – passes encrypted call audio/video between phones.</li>
+<li><b>Expo and Google Firebase</b> – deliver notifications.</li><li>Public content sources (news, weather, podcasts, music, recipes) only receive normal requests from our server or your phone – never your personal data.</li></ul>
+<h2>5. How long we keep it</h2>
+<p>As long as your account exists. Stories disappear after 24 hours. When you delete your account, your profile, posts, messages and other personal data are deleted within 30 days (backups within 90 days), except where the law requires us to keep something.</p>
+<h2>6. Your rights</h2>
+<ul><li>See, correct or download your data.</li><li>Delete your account and data.</li><li>Withdraw consent (for example turn off notifications or location) at any time.</li><li>Complain to us (contact above). We reply within 30 days. You may also complain to your data-protection authority (UAE Data Office; India Data Protection Board).</li></ul>
+<p>To use any right, email <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a> from your account email.</p>
+<h2>7. Children</h2>
+<p>CIVIX is for people aged <b>13 and older</b>. Users under 18 need permission from a parent or guardian. We do not show targeted ads to anyone and do not track children. If you think a child is using CIVIX without permission, contact us and we will delete the account.</p>
+<h2>8. Security</h2>
+<p>End-to-end encryption for chats and calls, encrypted connections (HTTPS), optional 2-step login, “log out of all devices”, and strict database access rules. No system is 100% safe, so please use a strong password and keep your backup password private.</p>
+<h2>9. Changes</h2>
+<p>If we change this policy we will update the date above and tell you in the app.</p>`));
+});
+app.get('/terms', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.send(legalPage('Terms of Use', `
+<h1>CIVIX Terms of Use</h1><p class="muted">Last updated: ${UPDATED} · <a href="/privacy">Privacy Policy</a></p>
+<div class="box">By creating a CIVIX account you agree to these simple rules.</div>
+<h2>1. Who can use CIVIX</h2><p>You must be at least 13. If you are under 18, you need a parent's or guardian's permission. One person, one real account – no fake accounts or pretending to be someone else.</p>
+<h2>2. Be kind and legal</h2><ul>
+<li>No hate, bullying, threats, harassment or violence.</li><li>No nudity, sexual content, or anything that harms children.</li>
+<li>No scams, spam, fake news on purpose, or selling illegal things.</li>
+<li>Follow the laws of the country you are in (for example the UAE and India).</li></ul>
+<h2>3. Your content</h2><p>You own what you post. You give CIVIX permission to store and show it in the app so your followers can see it. Only post things you have the right to share – no copied films, songs, or other people's photos without permission. You can delete your posts at any time.</p>
+<h2>4. Content from others</h2><p>News headlines, podcasts, music, recipes and videos in CIVIX come from their owners and open sources and link back to them. They belong to their owners. If you own something and want it removed, contact us.</p>
+<h2>5. Reports and removal</h2><p>Use the 🚩 Report button. We may remove content or suspend accounts that break these rules.</p>
+<h2>6. Coins</h2><p>CIVIX coins are just for fun. They are not money, cannot be bought, sold or exchanged, and have no value outside the app.</p>
+<h2>7. No guarantees</h2><p>CIVIX is a free, new app and is provided “as is”. We try hard but cannot promise it will always work without errors. We are not responsible for content posted by users.</p>
+<h2>8. Contact</h2><p><a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></p>`));
+});
+
+// ============================================================
+// 🎵 Music – free tracks that artists share on Audius (open music platform). Played from Audius
+// with credit to the artist. 🍳 Recipe of the day – TheMealDB (free test key; get a supporter key
+// before a public launch and put it in Render as MEALDB_KEY).
+// ============================================================
+function audiusTrack(t) {
+  return {
+    id: String(t.id),
+    title: String(t.title || '').slice(0, 150),
+    artist: (t.user && (t.user.name || t.user.handle)) || 'Audius artist',
+    art: (t.artwork && (t.artwork['480x480'] || t.artwork['150x150'])) || '',
+    secs: t.duration || null,
+    genre: t.genre || '',
+    url: `${AUDIUS}/tracks/${encodeURIComponent(t.id)}/stream?app_name=CIVIX`,
+    link: t.permalink ? `https://audius.co${t.permalink}` : 'https://audius.co',
+  };
+}
+app.get('/api/music/trending', async (req, res) => {
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests' });
+  const genre = String(req.query.genre || '').slice(0, 30);
+  try {
+    const tracks = await cached(`music-trend:${genre}`, 60 * 60 * 1000, async () => {
+      const j = await getJson(`${AUDIUS}/tracks/trending?app_name=CIVIX&limit=40${genre ? `&genre=${encodeURIComponent(genre)}` : ''}`);
+      return (j.data || []).filter(t => t.is_streamable !== false).map(audiusTrack);
+    });
+    res.json({ tracks });
+  } catch {
+    res.status(502).json({ error: 'Music is not available right now' });
+  }
+});
+app.get('/api/music/search', async (req, res) => {
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests' });
+  const q = String(req.query.q || '').trim().slice(0, 60);
+  if (!q) return res.json({ tracks: [] });
+  try {
+    const tracks = await cached(`music-q:${q.toLowerCase()}`, 60 * 60 * 1000, async () => {
+      const j = await getJson(`${AUDIUS}/tracks/search?app_name=CIVIX&query=${encodeURIComponent(q)}`);
+      return (j.data || []).filter(t => t.is_streamable !== false).slice(0, 40).map(audiusTrack);
+    });
+    res.json({ tracks });
+  } catch {
+    res.status(502).json({ error: 'Search is not available right now' });
+  }
+});
+const MEALDB = `https://www.themealdb.com/api/json/v1/${process.env.MEALDB_KEY || '1'}`;
+function mealOut(m) {
+  const ing = [];
+  for (let i = 1; i <= 20; i++) {
+    const name = (m[`strIngredient${i}`] || '').trim();
+    if (name) ing.push(`${(m[`strMeasure${i}`] || '').trim()} ${name}`.trim());
+  }
+  return { id: m.idMeal, name: m.strMeal, area: m.strArea, category: m.strCategory, image: m.strMealThumb, ingredients: ing, steps: String(m.strInstructions || '').slice(0, 4000), video: m.strYoutube || null, source: m.strSource || null };
+}
+app.get('/api/recipe/today', async (req, res) => {
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests' });
+  const day = new Date().toISOString().slice(0, 10);
+  try {
+    const meal = await cached(`recipe:${day}`, 24 * 60 * 60 * 1000, async () => {
+      const j = await getJson(`${MEALDB}/random.php`);
+      return j.meals && j.meals[0] ? mealOut(j.meals[0]) : null;
+    });
+    if (!meal) return res.status(502).json({ error: 'No recipe today' });
+    res.json({ meal });
+  } catch {
+    res.status(502).json({ error: 'Recipes are not available right now' });
+  }
+});
+app.get('/api/recipe/search', async (req, res) => {
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests' });
+  const q = String(req.query.q || '').trim().slice(0, 40);
+  if (!q) return res.json({ meals: [] });
+  try {
+    const meals = await cached(`recipe-q:${q.toLowerCase()}`, 6 * 60 * 60 * 1000, async () => {
+      const j = await getJson(`${MEALDB}/search.php?s=${encodeURIComponent(q)}`);
+      return (j.meals || []).slice(0, 20).map(mealOut);
+    });
+    res.json({ meals });
+  } catch {
+    res.status(502).json({ error: 'Search is not available right now' });
+  }
+});
+
 app.get('/u/:name', (req, res) => {
   const name = String(req.params.name || '').toLowerCase().replace(/[^a-z0-9._]/g, '').slice(0, 20);
   res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
