@@ -2455,6 +2455,31 @@ app.get('/reset', (req, res) => {
 
 app.get('/', (req, res) => res.send('CIVIX server is running'));
 
+// ---------- 📲 Download page: one easy link to give to family & friends ----------
+// https://civix-server-c961.onrender.com/download
+// The APK link comes from Supabase app_config key 'download_apk' (value {"url":"https://…apk","version":"2.1.0"})
+// or, if that is missing, from Render environment variable APK_URL.
+app.get('/download', async (req, res) => {
+  let url = process.env.APK_URL || '', version = '';
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_config?key=in.(download_apk,latest_apk)&select=key,value`, { headers: dbHeaders() });
+    const rows = r.ok ? await r.json() : [];
+    const pick = rows.find(x => x.key === 'download_apk') || rows.find(x => x.key === 'latest_apk');
+    if (pick && pick.value && /^https:\/\//.test(pick.value.url || '')) { url = pick.value.url; version = pick.value.version || ''; }
+  } catch { }
+  const safe = s => String(s).replace(/[<>"']/g, '');
+  res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Download CIVIX</title>
+<style>body{margin:0;font-family:system-ui,sans-serif;background:linear-gradient(165deg,#3B1766,#120A1C 40%,#07060B);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.c{max-width:420px;padding:28px;text-align:center}.logo{font-weight:900;letter-spacing:10px;font-size:34px}.logo b{color:#FF2D78}
+a.btn{display:block;margin:26px 0 18px;padding:18px;border-radius:20px;color:#fff;text-decoration:none;font-weight:900;font-size:20px;background:linear-gradient(90deg,#FF8A00,#FF2D78,#7B2FF7)}
+ol{text-align:left;color:#ddd;line-height:1.7;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:16px 16px 16px 34px}.m{color:#9a95ab;font-size:13px}</style></head>
+<body><div class="c"><div class="logo">CIVIX<b>.</b></div><p class="m">Your people, your interests, your world.</p>
+${url ? `<a class="btn" href="${safe(url)}">⬇ Download CIVIX${version ? ' ' + safe(version) : ''}</a>
+<ol><li>Tap the button above. The app file downloads.</li><li>Open the downloaded file (tap the notification, or Files → Downloads).</li><li>If the phone asks, allow <b>"Install unknown apps"</b> for Chrome / Files.</li><li>Tap <b>Install</b>, then <b>Open</b>.</li><li>Inside CIVIX, new features arrive by themselves – no need to download again.</li></ol>
+<p class="m">Android phones only. CIVIX is free, has no ads and never asks for money.</p>` : `<p>The download link is not set yet.</p>`}
+</div></body></html>`);
+});
+
 // ---------- 🩺 CIVIX status: real checks of the main services (no guessing) ----------
 // You can also post a notice for everyone: Supabase -> app_config -> key 'status_notice', value {"text":"…"}
 app.get('/api/status', async (req, res) => {
@@ -2841,10 +2866,49 @@ async function footballScores() {
   out.sort((a, b) => Number(b.live) - Number(a.live) || String(a.date).localeCompare(String(b.date)));
   return out.slice(0, 25);
 }
+// More sports (ESPN public scoreboards): basketball, tennis, F1, hockey, baseball, American football, more football leagues
+async function espnBoard(path, sport, leagueName) {
+  try {
+    const j = await getJson(`https://site.api.espn.com/apis/site/v2/sports/${path}/scoreboard`);
+    const out = [];
+    for (const ev of j.events || []) {
+      const st = (ev.status && ev.status.type) || {};
+      const comp = (ev.competitions || [])[0] || {};
+      let title = '';
+      if ((comp.competitors || []).length) {
+        title = comp.competitors.map(c => {
+          const n = (c.team && (c.team.shortDisplayName || c.team.displayName)) || (c.athlete && (c.athlete.shortName || c.athlete.displayName)) || '';
+          return `${n} ${c.score ?? ''}`.trim();
+        }).join('  –  ');
+      }
+      out.push({ title: title || ev.shortName || ev.name || '', status: st.shortDetail || st.description || '', live: st.state === 'in', league: leagueName || (j.leagues && j.leagues[0] && j.leagues[0].abbreviation) || '', sport, date: ev.date });
+    }
+    return out;
+  } catch { return []; }
+}
+async function moreSports() {
+  const boards = [
+    ['basketball/nba', 'basketball', 'NBA'], ['basketball/wnba', 'basketball', 'WNBA'],
+    ['tennis/atp', 'tennis', 'ATP'], ['tennis/wta', 'tennis', 'WTA'],
+    ['racing/f1', 'f1', 'Formula 1'],
+    ['hockey/nhl', 'hockey', 'NHL'], ['baseball/mlb', 'baseball', 'MLB'], ['football/nfl', 'nfl', 'NFL'],
+    ['soccer/fra.1', 'football', 'Ligue 1'], ['soccer/usa.1', 'football', 'MLS'], ['soccer/ksa.1', 'football', 'Saudi Pro League'], ['soccer/uefa.europa', 'football', 'Europa League'],
+  ];
+  const lists = await Promise.all(boards.map(([p, sp, n]) => espnBoard(p, sp, n)));
+  const all = lists.flat().filter(x => x.title);
+  all.sort((a, b) => Number(b.live) - Number(a.live) || String(a.date).localeCompare(String(b.date)));
+  return all;
+}
 app.get('/api/scores', async (req, res) => {
   const out = await cached('scores', 2 * 60 * 1000, async () => {
-    const [cricket, football] = await Promise.all([cricketScores().catch(() => []), footballScores().catch(() => [])]);
-    return { cricket, football, at: new Date().toISOString() };
+    const [cricket, football, more] = await Promise.all([cricketScores().catch(() => []), footballScores().catch(() => []), moreSports().catch(() => [])]);
+    const pick = sp => more.filter(x => x.sport === sp).slice(0, 25);
+    const live = [...cricket.filter(x => x.live), ...football.filter(x => x.live), ...more.filter(x => x.live)].slice(0, 40);
+    return {
+      cricket, football: [...football, ...pick('football')].slice(0, 35),
+      basketball: pick('basketball'), tennis: pick('tennis'), f1: pick('f1'), hockey: pick('hockey'), baseball: pick('baseball'), nfl: pick('nfl'),
+      live, at: new Date().toISOString(),
+    };
   });
   res.json(out);
 });
