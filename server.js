@@ -2455,6 +2455,40 @@ app.get('/reset', (req, res) => {
 
 app.get('/', (req, res) => res.send('CIVIX server is running'));
 
+// ---------- 🩺 CIVIX status: real checks of the main services (no guessing) ----------
+// You can also post a notice for everyone: Supabase -> app_config -> key 'status_notice', value {"text":"…"}
+app.get('/api/status', async (req, res) => {
+  try {
+    const out = await cached('status', 60 * 1000, async () => {
+      const t0 = Date.now();
+      const check = async (fn) => { try { return await fn(); } catch { return false; } };
+      const [db, notice] = await Promise.all([
+        check(async () => (await fetch(`${SUPABASE_URL}/rest/v1/app_config?select=key&limit=1`, { headers: dbHeaders() })).ok),
+        check(async () => {
+          const r = await fetch(`${SUPABASE_URL}/rest/v1/app_config?key=eq.status_notice&select=value`, { headers: dbHeaders() });
+          const j = r.ok ? await r.json() : [];
+          return (j[0] && j[0].value && j[0].value.text) || '';
+        }),
+      ]);
+      const ms = Date.now() - t0;
+      return {
+        checked: new Date().toISOString(),
+        notice: typeof notice === 'string' ? notice.slice(0, 300) : '',
+        services: [
+          { key: 'server', name: 'CIVIX server', ok: true, note: 'Running' },
+          { key: 'db', name: 'Accounts, posts and messages', ok: !!db, note: db ? `OK (${ms} ms)` : 'Having problems' },
+          { key: 'calls', name: 'Voice and video calls', ok: !!(process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY), note: process.env.LIVEKIT_URL ? 'Ready' : 'Not set up' },
+          { key: 'push', name: 'Notifications', ok: !!SUPABASE_SECRET_KEY, note: SUPABASE_SECRET_KEY ? 'Ready' : 'Not set up' },
+          { key: 'ai', name: 'AI answers', ok: !!process.env.ANTHROPIC_API_KEY, note: process.env.ANTHROPIC_API_KEY ? 'Ready' : 'Off' },
+        ],
+      };
+    });
+    res.json(out);
+  } catch {
+    res.json({ checked: new Date().toISOString(), notice: '', services: [{ key: 'server', name: 'CIVIX server', ok: true, note: 'Running' }] });
+  }
+});
+
 refresh();
 refreshReels();
 refreshYoutube();
@@ -3110,6 +3144,32 @@ app.get('/api/festivals', async (req, res) => {
     res.json({ festivals: list });
   } catch (e) {
     res.json({ festivals: [], error: 'Festivals are not available right now.' });
+  }
+});
+
+// ---------- 🧠 Did you know: Wikipedia's featured article + "on this day" (free, with source) ----------
+app.get('/api/knowledge', async (req, res) => {
+  try {
+    const d = new Date(Date.now() + 4 * 3600 * 1000);
+    const ymd = `${d.getUTCFullYear()}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}`;
+    const out = await cached(`knowledge:${ymd}`, 6 * 60 * 60 * 1000, async () => {
+      const r = await fetch(`https://api.wikimedia.org/feed/v1/wikipedia/en/featured/${ymd}`, { headers: { 'User-Agent': 'CIVIX/1.0 (contact via civix-server)' } });
+      if (!r.ok) throw new Error('wiki ' + r.status);
+      const j = await r.json();
+      const t = j.tfa || {};
+      const fact = t.title ? {
+        title: stripHtml(t.normalizedtitle || t.titles?.normalized || t.title),
+        text: String(t.extract || '').slice(0, 700),
+        image: t.thumbnail?.source || null,
+        link: t.content_urls?.mobile?.page || `https://en.wikipedia.org/wiki/${encodeURIComponent(t.title)}`,
+      } : null;
+      const onthisday = (j.onthisday || []).slice(0, 4).map(x => ({ year: x.year, text: String(x.text || '').slice(0, 240) }));
+      if (!fact && !onthisday.length) throw new Error('empty');
+      return { fact, onthisday, source: 'Wikipedia' };
+    });
+    res.json(out);
+  } catch {
+    res.json({ fact: null, onthisday: [] });
   }
 });
 
