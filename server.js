@@ -2641,6 +2641,41 @@ async function aiAnswer(q, wiki, news) {
   return text || null;
 }
 
+// ---------- ✨ "Explain this" for a news story (AI, clearly labelled) ----------
+app.get('/api/explain', async (req, res) => {
+  const title = cleanQ(req.query.title).slice(0, 200);
+  const desc = String(req.query.desc || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+  const source = cleanQ(req.query.source).slice(0, 60);
+  if (title.length < 5) return res.json({ error: 'Nothing to explain.' });
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests. Please wait a minute.' });
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return res.json({ error: 'Explain is not switched on yet.' });
+  try {
+    const text = await cached(`explain:${title.toLowerCase()}`, 12 * 60 * 60 * 1000, async () => {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
+          max_tokens: 350,
+          messages: [{
+            role: 'user',
+            content: `A user of a social app opened this news headline and wants it explained simply.\nHeadline: ${title}\nSource: ${source}\n${desc ? `Summary from the source: ${desc}\n` : ''}\nWrite 3 to 5 very short bullet points in simple English: what happened, why it matters, and any background term explained. Only use what the headline and summary say plus well-known background; do not invent new facts, numbers or quotes. If the headline alone is not enough, say what is unclear.`,
+          }],
+        }),
+      });
+      if (!r.ok) throw new Error('ai ' + r.status);
+      const j = await r.json();
+      const t = (j.content || []).map(c => c.text || '').join('').trim();
+      if (!t) throw new Error('empty');
+      return t;
+    });
+    res.json({ text });
+  } catch {
+    res.json({ error: 'Could not explain this right now.' });
+  }
+});
+
 app.get('/api/ask', async (req, res) => {
   const q = cleanQ(req.query.q);
   if (q.length < 2) return res.json({});
@@ -2951,6 +2986,66 @@ app.get('/api/music/search', async (req, res) => {
     res.status(502).json({ error: 'Search is not available right now' });
   }
 });
+// ---------- 🎵 Film & pop songs (official YouTube videos, played in YouTube's own player) ----------
+// Audius only has independent artists. Big singers (Arijit Singh, Thaman, Sid Sriram…) are on YouTube,
+// so CIVIX shows their official videos and plays them inside YouTube's player (allowed by YouTube).
+async function youtubeSongs(q) {
+  const html = await getText(`https://www.youtube.com/results?search_query=${encodeURIComponent(q)}&sp=EgIQAQ%253D%253D&hl=en`);
+  const m = /var ytInitialData = (\{.*?\});<\/script>/s.exec(html);
+  if (!m) return [];
+  const data = JSON.parse(m[1]);
+  const out = [];
+  const seen = new Set();
+  const walk = o => {
+    if (!o || typeof o !== 'object' || out.length >= 30) return;
+    const v = o.videoRenderer;
+    if (v && v.videoId && !seen.has(v.videoId)) {
+      seen.add(v.videoId);
+      const title = (v.title && ((v.title.runs || []).map(x => x.text).join('') || v.title.simpleText)) || '';
+      const ch = (v.ownerText && (v.ownerText.runs || [])[0]) || {};
+      const len = (v.lengthText && v.lengthText.simpleText) || '';
+      const secs = len.split(':').reduce((n, x) => n * 60 + (+x || 0), 0);
+      const live = !len || !!(v.badges || []).find(b => JSON.stringify(b).includes('LIVE'));
+      // songs only: 1 to 12 minutes (no live streams, no 3-hour jukeboxes)
+      if (!live && secs >= 60 && secs <= 720 && safeText(title)) {
+        out.push({
+          id: md5('yts:' + v.videoId), ytId: v.videoId, title: stripHtml(title), author: ch.text || 'YouTube', source: ch.text || 'YouTube',
+          description: ch.text || '', secs, length: len,
+          link: `https://www.youtube.com/watch?v=${v.videoId}`,
+          imageUrl: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+          videoUrl: `https://www.youtube.com/embed/${v.videoId}`,
+          videoType: 'youtube', isShort: false, vertical: false,
+          publishedAt: new Date().toISOString(), language: 'any', country: 'World', category: 'Entertainment', kind: 'creator',
+        });
+      }
+      return;
+    }
+    for (const k in o) walk(o[k]);
+  };
+  walk(data);
+  return out;
+}
+const SONG_LANGS = {
+  te: 'latest telugu songs', hi: 'latest hindi songs', ta: 'latest tamil songs', en: 'top english songs', pa: 'latest punjabi songs',
+  ml: 'latest malayalam songs', kn: 'latest kannada songs', ar: 'latest arabic songs', lofi: 'lofi songs hindi', love: 'romantic songs telugu hindi',
+};
+app.get('/api/music/songs', async (req, res) => {
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Too many requests' });
+  const q = cleanQ(req.query.q).slice(0, 80);
+  const lang = String(req.query.lang || 'te');
+  const query = q ? `${q} song` : SONG_LANGS[lang] || SONG_LANGS.te;
+  try {
+    const songs = await cached(`songs:${query.toLowerCase()}`, (q ? 3 : 6) * 60 * 60 * 1000, async () => {
+      const list = await youtubeSongs(query);
+      if (!list.length) throw new Error('none');
+      return list;
+    });
+    res.json({ songs });
+  } catch {
+    res.json({ songs: [], error: 'Songs are not available right now. Try again soon.' });
+  }
+});
+
 const MEALDB = `https://www.themealdb.com/api/json/v1/${process.env.MEALDB_KEY || '1'}`;
 function mealOut(m) {
   const ing = [];
