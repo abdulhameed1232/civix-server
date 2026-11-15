@@ -2053,22 +2053,37 @@ app.post('/api/call-token', async (req, res) => {
 // ============================================================
 // Send to Expo push and write any problem in the logs (also checks the delivery receipts)
 async function sendExpoPush(messages, label) {
-  const sent = await fetch('https://exp.host/--/api/v2/push/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(messages),
-  });
-  const j = await sent.json().catch(() => ({}));
+  // Try twice (a short network hiccup or a busy Expo server must not mean "no call notification")
+  let sent = null, j = {};
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      sent = await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(messages),
+      });
+      j = await sent.json().catch(() => ({}));
+      if (sent.ok || (sent.status < 500 && sent.status !== 429)) break;
+    } catch (e) {
+      sent = null;
+    }
+    await new Promise(r => setTimeout(r, 700));
+  }
+  if (!sent) { console.log(`Push ${label} error: could not reach Expo`); return; }
   if (!sent.ok) {
     console.log(`Push ${label} error:`, sent.status, JSON.stringify(j).slice(0, 300));
     return;
   }
   const tickets = Array.isArray(j.data) ? j.data : [];
   const ids = [];
-  tickets.forEach(t => {
-    if (t.status === 'error') console.log(`Push ${label} ticket error:`, t.message, t.details ? JSON.stringify(t.details) : '');
-    else if (t.id) ids.push(t.id);
+  const dead = [];
+  tickets.forEach((t, i) => {
+    if (t.status === 'error') {
+      console.log(`Push ${label} ticket error:`, t.message, t.details ? JSON.stringify(t.details) : '');
+      if (t.details && t.details.error === 'DeviceNotRegistered' && messages[i] && messages[i].to) dead.push(String(messages[i].to));
+    } else if (t.id) ids.push(t.id);
   });
+  dropDeadTokens(dead);
   console.log(`Push ${label}: ${tickets.length} sent`);
   if (!ids.length) return;
   // Ask Expo 15 seconds later whether Google really delivered it
@@ -2088,6 +2103,17 @@ async function sendExpoPush(messages, label) {
   }, 15000);
 }
 
+
+// Phones that told Expo "this app was removed / token is old" are deleted, so they stop wasting notification slots
+async function dropDeadTokens(tokens) {
+  const list = Array.from(new Set(tokens)).filter(t => /^ExponentPushToken\[[\w-]+\]$/.test(t));
+  if (!list.length || !SUPABASE_SECRET_KEY) return;
+  try {
+    const inList = list.map(t => `"${t}"`).join(',');
+    await fetch(`${SUPABASE_URL}/rest/v1/push_tokens?token=in.(${encodeURIComponent(inList)})`, { method: 'DELETE', headers: dbHeaders() });
+    console.log(`Removed ${list.length} dead push token(s)`);
+  } catch { }
+}
 
 // ---------- WhatsApp-style calls (part18.sql): which phones show the ringing call screen themselves ----------
 let callPushCfg = { at: 0, full: false, msg: false };
@@ -2656,7 +2682,7 @@ async function discoverNasa() {
   });
   return (Array.isArray(data) ? data : []).filter(x => x.media_type === 'image' && (x.url || x.hdurl)).map(x => ({ id: `nasa-${x.date}-${(x.title || '').length}`, imageUrl: x.url || x.hdurl, w: 4, h: 3, title: x.title, credit: x.copyright ? String(x.copyright).replace(/\s+/g, ' ').trim() : 'NASA', source: 'NASA', link: `https://apod.nasa.gov/apod/ap${String(x.date || '').slice(2).replace(/-/g, '')}.html`, topic: 'Science' }));
 }
-app.get('/api/discover', async (req, res) => {
+app.get('/api/discover-feed', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const asked = String(req.query.topics || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 6);
@@ -2823,6 +2849,72 @@ app.get('/api/ask', async (req, res) => {
     res.json(out);
   } catch {
     res.json({ q, error: 'Search is not available right now' });
+  }
+});
+
+// ---------- CIVIX Play: fresh AI-made game content (clearly labelled in the app; the app has an offline set too) ----------
+const playTries = new Map();
+function playTooMany(req) {
+  const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+  const now = Date.now();
+  const list = (playTries.get(ip) || []).filter(t => now - t < 60 * 1000);
+  list.push(now);
+  playTries.set(ip, list);
+  if (playTries.size > 5000) playTries.clear();
+  return list.length > 14;
+}
+const PLAY_TOPICS = ['Science', 'Geography', 'Sports', 'Movies', 'Food', 'Tech', 'History', 'Animals', 'India', 'Dubai & UAE', 'Space', 'Music'];
+function playPrompt(kind, q) {
+  const topic = PLAY_TOPICS.includes(q.topic) ? q.topic : PLAY_TOPICS[Math.floor(Math.random() * PLAY_TOPICS.length)];
+  const name = String(q.name || 'my friend').replace(/[^A-Za-z\u00C0-\u024F\u0600-\u06FF\u0900-\u097F\u0C00-\u0C7F ]/g, '').trim().slice(0, 20) || 'my friend';
+  const seed = `Variety seed: ${String(q.seed || '').slice(0, 12)}.`;
+  const safe = 'Family-friendly, kind, no politics, no religion, no insults about looks, body, race, health or family. ';
+  const J = 'Reply with ONLY valid JSON, no markdown, no extra words. ';
+  switch (kind) {
+    case 'quiz': return { n: 8, text: `${J}${safe}Write 8 multiple-choice trivia questions about "${topic}" for a general audience, medium difficulty, only facts that are certain and well known. Format: [{"q":"question","a":["correct","wrong","wrong","wrong"],"c":0}]. The correct answer is ALWAYS the first item in "a". ${seed}`, topic };
+    case 'emoji': return { n: 8, text: `${J}${safe}Write 8 "guess the movie from emojis" puzzles using famous well-known films. Format: [{"e":"2 to 4 emojis","a":"Movie title"}]. ${seed}` };
+    case 'wyr': return { n: 8, text: `${J}${safe}Write 8 fun, light "Would you rather" pairs. Format: [["option one","option two"]]. ${seed}` };
+    case 'caption': return { n: 8, text: `${J}${safe}Write 8 short, funny, everyday photo situations described in one sentence each, for a caption contest. Format: ["situation"]. ${seed}` };
+    case 'guess': return { n: 5, text: `${J}${safe}Write 5 "Guess who or what" puzzles about famous people, places or things (only certain, well-known facts). Each has 4 clues from hard to easy. Format: [{"a":"answer","clues":["hard","medium","easy","very easy"]}]. ${seed}` };
+    case 'roast': return { n: 1, text: `${J}${safe}Write ONE short, ${q.mode === 'roast' ? 'playful and gentle teasing line about everyday harmless habits (being late, snacks, phone battery), never about looks or personal traits' : 'warm and sincere compliment'} for a friend called ${name}. Max 22 words. Format: {"line":"..."}. ${seed}` };
+    case 'mystery': return { n: 1, text: `${J}${safe}Write one tiny gentle detective mystery with a harmless, funny solution (nobody is hurt, no crime scenes). Format: {"title":"","setting":"one sentence","clues":["clue1","clue2","clue3"],"suspects":["s1","s2","s3","s4"],"ans":0,"reveal":"one or two sentences"}. "ans" is the index of the right suspect and the clues must lead to it. ${seed}` };
+    case 'story': return { n: 1, text: `${J}${safe}Write a short interactive story with choices. Format: {"title":"","start":"a","nodes":{"a":{"t":"2 sentences","c":[["choice one","b"],["choice two","c"]]},"b":{...},"c":{...},"d":{"t":"...","end":"emoji + Ending: title"}}}. Use 7 nodes (a to g): a has 2 choices leading to b and c, b and c each have 2 choices leading to d, e, f, g, and d to g are endings with an "end" field and no "c". ${seed}` };
+    default: return null;
+  }
+}
+function playJson(text) {
+  const t = String(text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  const a = t.search(/[\[{]/);
+  if (a < 0) throw new Error('no json');
+  const open = t[a], close = open === '[' ? ']' : '}';
+  const b = t.lastIndexOf(close);
+  return JSON.parse(t.slice(a, b + 1));
+}
+app.get('/api/play/ai', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const kind = String(req.query.kind || '');
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return res.json({ error: 'off' });
+  if (playTooMany(req)) return res.status(429).json({ error: 'busy' });
+  const p = playPrompt(kind, req.query);
+  if (!p) return res.json({ error: 'kind' });
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
+        max_tokens: kind === 'story' ? 1500 : 1100,
+        temperature: 1,
+        messages: [{ role: 'user', content: p.text }],
+      }),
+    });
+    if (!r.ok) return res.json({ error: 'ai' });
+    const j = await r.json();
+    const data = playJson((j.content || []).map(c => c.text || '').join(''));
+    res.json({ kind, topic: p.topic || '', data });
+  } catch {
+    res.json({ error: 'ai' });
   }
 });
 
@@ -3567,14 +3659,15 @@ app.get('/api/podcasts/episodes', async (req, res) => {
 
 // ============================================================
 // 🔔 Daily CIVIX notifications (part22.sql) – 3 or 4 a day, each one only once a day.
-// Times (UTC): 05:00 goals · 09:30 news · 14:00 quiz · 17:00 "your day" (only if you got likes/comments).
+// Times (UTC): 05:00 goals · 08:00 cooking idea · 09:30 news · 14:00 quiz (every 2nd day) · 17:00 "your day" (only if you got likes/comments).
 // That is 9:00 / 13:30 / 18:00 / 21:00 in Dubai (10:30 / 15:00 / 19:30 / 22:30 in India).
 // Anyone can turn them off: Profile → Settings → Daily notifications.
 // ============================================================
 const DAILY_SLOTS = [
   { slot: 'goals', h: 5, m: 0 },
   { slot: 'news', h: 9, m: 30 },
-  { slot: 'quiz', h: 14, m: 0 },
+  { slot: 'food', h: 8, m: 0 },
+  { slot: 'quiz', h: 14, m: 0, every: 2 }, // every second day, so people are not flooded
   { slot: 'digest', h: 17, m: 0 },
 ];
 const GOAL_TIPS = [
@@ -3629,6 +3722,20 @@ async function sendDaily(slot) {
       id: top.id, title: top.title, link: top.link, source: top.source, imageUrl: top.imageUrl || null,
       publishedAt: top.publishedAt, description: String(top.description || '').slice(0, 300), language: top.language || 'en', category: top.category || 'News',
     };
+  } else if (slot === 'food') {
+    // The same dish as the recipe card in the app today
+    const day = new Date().toISOString().slice(0, 10);
+    let meal = null;
+    try {
+      meal = await cached(`recipe:${day}`, 24 * 60 * 60 * 1000, async () => {
+        const j = await getJson(`${MEALDB}/random.php`);
+        return j.meals && j.meals[0] ? mealOut(j.meals[0]) : null;
+      });
+    } catch { }
+    if (!meal || !meal.name) return 0;
+    title = '🍳 Today’s cooking idea';
+    body = `${meal.name}${meal.area && meal.area !== 'Unknown' ? ` (${meal.area})` : ''}: tap to see the recipe`;
+    open = 'hub';
   } else if (slot === 'quiz') {
     title = '🧠 Today’s quiz is ready';
     body = '5 quick questions – can you get them all right? See the leaderboard!';
@@ -3648,6 +3755,7 @@ async function runDaily() {
   for (const s of DAILY_SLOTS) {
     const at = s.h * 60 + s.m;
     if (mins < at || mins > at + 50) continue; // only in its time window (not hours later after a restart)
+    if (s.every && Math.floor(Date.now() / 86400000) % s.every !== 0) continue;
     try {
       if (!(await claimSlot(day, s.slot))) continue;
       const n = await sendDaily(s.slot);
