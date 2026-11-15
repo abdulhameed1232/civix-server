@@ -2607,6 +2607,77 @@ async function youtubeSearch(q, shortsOnly) {
   return rssToReels(out.map(x => ({ ...x, publishedAt: new Date().toISOString() })), { language: 'any', country: 'World', category: 'Entertainment', kind: 'creator' });
 }
 
+// ---------- DISCOVER: fresh photos for the Home feed ----------
+// Uses the keys you already have on Render: PEXELS_API_KEY, UNSPLASH_ACCESS_KEY, PIXABAY_API_KEY.
+// NASA picture of the day works with no key (NASA_API_KEY is optional and gives a higher limit).
+const NASA_API_KEY = process.env.NASA_API_KEY || 'DEMO_KEY';
+const DISCOVER_QUERY = {
+  World: 'world travel city', Politics: 'city skyline', Business: 'office workspace', Technology: 'technology gadgets',
+  Gaming: 'gaming setup', Sports: 'sports action', Science: 'science laboratory', Entertainment: 'concert stage lights',
+  Movies: 'cinema', Music: 'musician', Travel: 'travel landscape', Food: 'delicious food', Fashion: 'fashion style',
+  Art: 'art painting', Photography: 'street photography', Nature: 'nature landscape', Education: 'books study',
+};
+const DISCOVER_EXTRA = ['mountains', 'ocean sunset', 'architecture', 'wildlife', 'space galaxy', 'coffee', 'flowers', 'vintage cars', 'street food', 'northern lights'];
+const dRand = n => Math.floor(Math.random() * n);
+const dShuffle = a => { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = dRand(i + 1); [b[i], b[j]] = [b[j], b[i]]; } return b; };
+
+async function discoverPexels(q, topic) {
+  const page = 1 + dRand(8);
+  const data = await cached(`dpx:${q}:${page}`, 30 * 60 * 1000, async () => {
+    const r = await fetch(`https://api.pexels.com/v1/search?query=${encodeURIComponent(q)}&per_page=14&page=${page}`, { headers: { Authorization: PEXELS_API_KEY } });
+    if (!r.ok) throw new Error(`Pexels ${r.status}`);
+    return r.json();
+  });
+  return (data.photos || []).map(p => ({ id: `px-${p.id}`, imageUrl: p.src?.large || p.src?.medium, w: p.width, h: p.height, title: p.alt || q, credit: p.photographer, source: 'Pexels', link: p.url, topic }));
+}
+async function discoverUnsplash(q, topic) {
+  const page = 1 + dRand(8);
+  const data = await cached(`dun:${q}:${page}`, 30 * 60 * 1000, async () => {
+    const r = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(q)}&per_page=14&page=${page}&content_filter=high`, { headers: { Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}`, 'Accept-Version': 'v1' } });
+    if (!r.ok) throw new Error(`Unsplash ${r.status}`);
+    return r.json();
+  });
+  return (data.results || []).map(p => ({ id: `un-${p.id}`, imageUrl: p.urls?.regular, w: p.width, h: p.height, title: p.description || p.alt_description || q, credit: p.user?.name, source: 'Unsplash', link: p.links?.html, topic }));
+}
+async function discoverPixabay(q, topic) {
+  const page = 1 + dRand(6);
+  const data = await cached(`dpb:${q}:${page}`, 30 * 60 * 1000, async () => {
+    const r = await fetch(`https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${encodeURIComponent(q)}&image_type=photo&safesearch=true&per_page=16&page=${page}`);
+    if (!r.ok) throw new Error(`Pixabay ${r.status}`);
+    return r.json();
+  });
+  return (data.hits || []).map(p => ({ id: `pb-${p.id}`, imageUrl: p.largeImageURL || p.webformatURL, w: p.imageWidth, h: p.imageHeight, title: (p.tags || q).split(',').slice(0, 3).join(' · '), credit: p.user, source: 'Pixabay', link: p.pageURL, topic }));
+}
+async function discoverNasa() {
+  const data = await cached(`dnasa:${Math.floor(Date.now() / (20 * 60 * 1000))}`, 20 * 60 * 1000, async () => {
+    const r = await fetch(`https://api.nasa.gov/planetary/apod?api_key=${NASA_API_KEY}&count=3`);
+    if (!r.ok) throw new Error(`NASA ${r.status}`);
+    return r.json();
+  });
+  return (Array.isArray(data) ? data : []).filter(x => x.media_type === 'image' && (x.url || x.hdurl)).map(x => ({ id: `nasa-${x.date}-${(x.title || '').length}`, imageUrl: x.url || x.hdurl, w: 4, h: 3, title: x.title, credit: x.copyright ? String(x.copyright).replace(/\s+/g, ' ').trim() : 'NASA', source: 'NASA', link: `https://apod.nasa.gov/apod/ap${String(x.date || '').slice(2).replace(/-/g, '')}.html`, topic: 'Science' }));
+}
+app.get('/api/discover', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const asked = String(req.query.topics || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 6);
+    const picks = dShuffle(asked.filter(t => DISCOVER_QUERY[t])).slice(0, 3).map(t => [DISCOVER_QUERY[t], t]);
+    picks.push([DISCOVER_EXTRA[dRand(DISCOVER_EXTRA.length)], 'Nature'], [DISCOVER_EXTRA[dRand(DISCOVER_EXTRA.length)], 'Photography']);
+    const providers = [];
+    if (PEXELS_API_KEY) providers.push(discoverPexels);
+    if (UNSPLASH_ACCESS_KEY) providers.push(discoverUnsplash);
+    if (PIXABAY_API_KEY) providers.push(discoverPixabay);
+    const jobs = providers.length ? picks.slice(0, 5).map(([q, t], i) => providers[(i + dRand(providers.length)) % providers.length](q, t).catch(() => [])) : [];
+    if (Math.random() < 0.5) jobs.push(discoverNasa().catch(() => []));
+    const lists = await Promise.all(jobs);
+    const seen = new Set();
+    const items = dShuffle(lists.flat()).filter(x => x && x.imageUrl && !seen.has(x.id) && seen.add(x.id));
+    const n = Math.max(4, Math.min(24, Number(req.query.n) || 12));
+    res.json({ items: items.slice(0, n), sources: providers.length + 1 });
+  } catch (e) {
+    res.json({ items: [], error: String(e.message || e) });
+  }
+});
+
 app.get('/api/video-search', async (req, res) => {
   const q = cleanQ(req.query.q);
   if (q.length < 2) return res.json({ items: [] });
