@@ -2791,7 +2791,10 @@ async function aiAnswer(q, wiki, news) {
       }],
     }),
   });
-  if (!r.ok) return null;
+  if (!r.ok) {
+    console.log('AI answer error:', r.status, (await r.text().catch(() => '')).slice(0, 300));
+    return null;
+  }
   const j = await r.json();
   const text = (j.content || []).map(c => c.text || '').join('').trim();
   return text || null;
@@ -2832,21 +2835,30 @@ app.get('/api/explain', async (req, res) => {
   }
 });
 
+const AI_CACHE = new Map();
 app.get('/api/ask', async (req, res) => {
   const q = cleanQ(req.query.q);
   if (q.length < 2) return res.json({});
   if (hubTooMany(req)) return res.status(429).json({ error: 'Too many searches. Please wait a minute.' });
   try {
-    const out = await cached(`ask:${q.toLowerCase()}`, 30 * 60 * 1000, async () => {
+    const base = await cached(`askbase:${q.toLowerCase()}`, 30 * 60 * 1000, async () => {
       const [wiki, news, videos] = await Promise.all([
         wikiSummary(q).catch(() => null),
         newsSearch(q).catch(() => []),
         youtubeSearch(q, false).catch(() => []),
       ]);
-      const ai = await aiAnswer(q, wiki, news).catch(() => null);
-      return { q, ai, wiki, news: news.slice(0, 12), videos: videos.slice(0, 30) };
+      return { q, wiki, news: news.slice(0, 12), videos: videos.slice(0, 30) };
     });
-    res.json(out);
+    // The AI answer is cached only when it worked (a missing key or a hiccup must not stick for 30 minutes)
+    const k = q.toLowerCase();
+    let ai = null;
+    const hit = AI_CACHE.get(k);
+    if (hit && Date.now() - hit.t < 30 * 60 * 1000) ai = hit.text;
+    else {
+      ai = await aiAnswer(q, base.wiki, base.news).catch(() => null);
+      if (ai) { AI_CACHE.set(k, { t: Date.now(), text: ai }); if (AI_CACHE.size > 400) AI_CACHE.clear(); }
+    }
+    res.json({ ...base, ai, aiOff: !process.env.ANTHROPIC_API_KEY });
   } catch {
     res.json({ q, error: 'Search is not available right now' });
   }
