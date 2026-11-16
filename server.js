@@ -49,7 +49,9 @@ app.use((req, res, next) => {
   next();
 });
 app.use(cors());
-app.use(express.json({ limit: '10kb' }));
+const smallJson = express.json({ limit: '10kb' });
+const bigJson = express.json({ limit: '14mb' });
+app.use((req, res, next) => (req.path === '/api/ai/doc' ? bigJson(req, res, next) : smallJson(req, res, next)));
 
 const parser = new Parser({
   timeout: 15000,
@@ -2772,6 +2774,40 @@ async function wikiSummary(q) {
 }
 
 // ---------- Ask CIVIX: answer + videos + news ----------
+// ---------- Talking to Claude: tries a list of model names, so one retired name never switches the AI off ----------
+let GOOD_MODEL = null;
+async function claudeFetch(key, payload) {
+  const list = [GOOD_MODEL, process.env.ANTHROPIC_MODEL, 'claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5']
+    .filter((m, i, a) => m && a.indexOf(m) === i);
+  let last = null;
+  for (const model of list) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ ...payload, model }),
+    });
+    last = r;
+    if (r.ok) { GOOD_MODEL = model; return r; }
+    if (r.status === 404 || r.status === 400) continue; // wrong or retired model name: try the next one
+    return r; // bad key, too many requests, busy: another model will not help
+  }
+  return last;
+}
+// Open this in Chrome to see exactly why the AI works or not (it never shows the key)
+app.get('/api/ai/health', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (hubTooMany(req)) return res.status(429).json({ error: 'Please wait a minute.' });
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return res.json({ ok: false, problem: 'ANTHROPIC_API_KEY is not set on this server (Render → Environment).' });
+  try {
+    const r = await claudeFetch(key, { max_tokens: 16, messages: [{ role: 'user', content: 'Say OK' }] });
+    const body = await r.json().catch(() => ({}));
+    res.json({ ok: r.ok, status: r.status, model: GOOD_MODEL, problem: r.ok ? null : ((body.error && body.error.message) || 'unknown') });
+  } catch (e) {
+    res.json({ ok: false, problem: 'Could not reach the AI service: ' + e.message });
+  }
+});
+
 async function aiAnswer(q, wiki, news) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return null;
@@ -2779,18 +2815,13 @@ async function aiAnswer(q, wiki, news) {
     wiki ? `Wikipedia: ${wiki.text}` : '',
     ...news.slice(0, 6).map(n => `News (${n.source}): ${n.title}`),
   ].filter(Boolean).join('\n');
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
+  const r = await claudeFetch(key, {
       max_tokens: 400,
       messages: [{
         role: 'user',
         content: `Answer this question for a social app user in simple English, in at most 6 short sentences. Use the context when it helps. If you are not sure, say so.\n\nContext:\n${context}\n\nQuestion: ${q}`,
       }],
-    }),
-  });
+    });
   if (!r.ok) {
     console.log('AI answer error:', r.status, (await r.text().catch(() => '')).slice(0, 300));
     return null;
@@ -2811,18 +2842,13 @@ app.get('/api/explain', async (req, res) => {
   if (!key) return res.json({ error: 'Explain is not switched on yet.' });
   try {
     const text = await cached(`explain:${title.toLowerCase()}`, 12 * 60 * 60 * 1000, async () => {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
+      const r = await claudeFetch(key, {
           max_tokens: 350,
           messages: [{
             role: 'user',
             content: `A user of a social app opened this news headline and wants it explained simply.\nHeadline: ${title}\nSource: ${source}\n${desc ? `Summary from the source: ${desc}\n` : ''}\nWrite 3 to 5 very short bullet points in simple English: what happened, why it matters, and any background term explained. Only use what the headline and summary say plus well-known background; do not invent new facts, numbers or quotes. If the headline alone is not enough, say what is unclear.`,
           }],
-        }),
-      });
+        });
       if (!r.ok) throw new Error('ai ' + r.status);
       const j = await r.json();
       const t = (j.content || []).map(c => c.text || '').join('').trim();
@@ -2861,6 +2887,144 @@ app.get('/api/ask', async (req, res) => {
     res.json({ ...base, ai, aiOff: !process.env.ANTHROPIC_API_KEY });
   } catch {
     res.json({ q, error: 'Search is not available right now' });
+  }
+});
+
+// ---------- 📄 Document chat + presentation coach (inside Ask CIVIX AI) ----------
+// Nothing is stored: the file is read, sent to the AI for this one answer, then forgotten.
+const zlib = require('zlib');
+function unzipEntries(buf) {
+  // Minimal ZIP reader (PPTX and DOCX are zip files). No extra packages needed.
+  let e = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 70000); i--) { if (buf.readUInt32LE(i) === 0x06054b50) { e = i; break; } }
+  if (e < 0) throw new Error('not a zip');
+  const count = buf.readUInt16LE(e + 10);
+  let p = buf.readUInt32LE(e + 16);
+  const out = {};
+  for (let k = 0; k < count && k < 3000; k++) {
+    if (buf.readUInt32LE(p) !== 0x02014b50) break;
+    const method = buf.readUInt16LE(p + 10);
+    const csize = buf.readUInt32LE(p + 20);
+    const nlen = buf.readUInt16LE(p + 28), xlen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32);
+    const off = buf.readUInt32LE(p + 42);
+    const name = buf.toString('utf8', p + 46, p + 46 + nlen);
+    p += 46 + nlen + xlen + clen;
+    if (!/^(ppt\/slides\/slide\d+\.xml|ppt\/notesSlides\/notesSlide\d+\.xml|word\/document\.xml)$/.test(name)) continue;
+    const ds = off + 30 + buf.readUInt16LE(off + 26) + buf.readUInt16LE(off + 28);
+    const raw = buf.slice(ds, ds + csize);
+    out[name] = (method === 8 ? zlib.inflateRawSync(raw, { maxOutputLength: 6 * 1024 * 1024 }) : raw).toString('utf8');
+  }
+  return out;
+}
+const xmlText = s => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+function officeText(buf, kind) {
+  const files = unzipEntries(buf);
+  if (kind === 'docx') {
+    const x = files['word/document.xml'] || '';
+    return xml_paras(x, /<w:p[ >][\s\S]*?<\/w:p>/g, /<w:t[^>]*>([\s\S]*?)<\/w:t>/g).join('\n');
+  }
+  const num = n => parseInt(n.match(/(\d+)\.xml$/)[1], 10);
+  const slides = Object.keys(files).filter(n => n.startsWith('ppt/slides/')).sort((a, b) => num(a) - num(b));
+  const notes = {};
+  Object.keys(files).filter(n => n.startsWith('ppt/notesSlides/')).forEach(n => { notes[num(n)] = files[n]; });
+  return slides.map(n => {
+    const i = num(n);
+    const body = xml_paras(files[n], /<a:p>[\s\S]*?<\/a:p>/g, /<a:t>([\s\S]*?)<\/a:t>/g).join('\n');
+    const nt = notes[i] ? xml_paras(notes[i], /<a:p>[\s\S]*?<\/a:p>/g, /<a:t>([\s\S]*?)<\/a:t>/g).join(' ') : '';
+    return `--- Slide ${i} ---\n${body}${nt ? `\n(Speaker notes: ${nt})` : ''}`;
+  }).join('\n\n');
+}
+function xml_paras(xml, paraRe, textRe) {
+  const out = [];
+  (xml.match(paraRe) || []).forEach(p => {
+    const parts = [];
+    let m;
+    textRe.lastIndex = 0;
+    while ((m = textRe.exec(p))) parts.push(xmlText(m[1]));
+    const t = parts.join('').trim();
+    if (t) out.push(t);
+  });
+  return out;
+}
+
+const docTries = new Map();
+function docTooMany(uid) {
+  const now = Date.now();
+  const list = (docTries.get(uid) || []).filter(t => now - t < 24 * 3600 * 1000);
+  const recent = list.filter(t => now - t < 10 * 60 * 1000).length;
+  if (recent >= 8 || list.length >= 30) return true; // 8 per 10 minutes, 30 per day per person (keeps the AI bill under control)
+  list.push(now);
+  docTries.set(uid, list);
+  if (docTries.size > 5000) docTries.clear();
+  return false;
+}
+const DOC_MODES = {
+  ask: 'Answer the user\'s question using ONLY the material. If the material does not say it, say so clearly instead of guessing.',
+  summary: 'Summarise the material in short sections (slide by slide or page by page if it has them). Keep each section to 1 or 2 lines. Finish with the 3 most important points.',
+  examiner: 'Act as a fair presentation examiner. Ask exactly 5 short questions about the material, from easy to hard, numbered. Do not give the answers yet.',
+  check: 'The user wrote or said an explanation of (part of) the material. Compare it with the material and give honest feedback in these short sections: ✅ Correct and clear, ⚠️ Missing important points, ❌ Mistakes compared with the material (quote what the material says), ✍️ Language suggestions (grammar, repetition, filler words), 💡 One improved version of their weakest sentence, 🎯 What to practise next. Never invent mistakes. A different but valid explanation is NOT a mistake. If something is only a style choice, say it is optional.',
+};
+app.post('/api/ai/doc', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const auth = String(req.headers.authorization || '');
+    if (!/^Bearer \S+$/.test(auth)) return res.status(401).json({ error: 'Please sign in' });
+    const key = process.env.ANTHROPIC_API_KEY;
+    if (!key) return res.json({ error: 'The AI is switched off on the server (no AI key).' });
+    const u = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_KEY, Authorization: auth } });
+    if (!u.ok) return res.status(401).json({ error: 'Please sign in again' });
+    const uid = (await u.json()).id;
+    if (!uid) return res.status(401).json({ error: 'Please sign in again' });
+    if (docTooMany(uid)) return res.status(429).json({ error: 'You have used the document AI a lot. Please try again later (limit: 8 every 10 minutes, 30 a day).' });
+
+    const b = req.body || {};
+    const mode = DOC_MODES[b.mode] ? b.mode : 'ask';
+    const question = String(b.question || '').slice(0, 1500);
+    const attempt = String(b.attempt || '').slice(0, 6000);
+    const blocks = [];
+    let material = String(b.text || '').slice(0, 60000);
+    let sawVisuals = false;
+
+    if (b.file && typeof b.file.b64 === 'string') {
+      const kind = String(b.file.kind || '');
+      if (b.file.b64.length > 13 * 1024 * 1024) return res.json({ error: 'That file is too big (limit about 9 MB).' });
+      const buf = Buffer.from(b.file.b64, 'base64');
+      if (kind === 'pdf') {
+        if (buf.slice(0, 5).toString() !== '%PDF-') return res.json({ error: 'That does not look like a PDF.' });
+        blocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b.file.b64 } });
+        sawVisuals = true;
+      } else if (kind === 'pptx' || kind === 'docx') {
+        try { material = (officeText(buf, kind) + '\n' + material).slice(0, 60000); } catch { return res.json({ error: `I could not read that ${kind.toUpperCase()} file. Try saving it again, or export it as a PDF.` }); }
+        if (material.trim().length < 20) return res.json({ error: 'I found almost no text in that file. If it is mostly pictures, export it as a PDF or add photos of the pages.' });
+      } else return res.json({ error: 'That file type is not supported. Use PDF, PPTX, DOCX or paste the text.' });
+    }
+    const imgs = Array.isArray(b.images) ? b.images.slice(0, 4) : [];
+    for (const im of imgs) {
+      const mime = String(im.mime || 'image/jpeg');
+      if (!/^image\/(jpeg|png|webp)$/.test(mime) || typeof im.b64 !== 'string' || im.b64.length > 5.5 * 1024 * 1024) return res.json({ error: 'One of the photos is too big or not supported.' });
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: mime, data: im.b64 } });
+      sawVisuals = true;
+    }
+    if (!blocks.length && material.trim().length < 20) return res.json({ error: 'Add your material first (paste text, choose a file, or pick photos of the pages).' });
+    if (mode === 'ask' && question.length < 2) return res.json({ error: 'Type your question.' });
+    if (mode === 'check' && attempt.trim().length < 15) return res.json({ error: 'Write (or paste) your explanation first. It needs at least a couple of sentences.' });
+
+    const hist = (Array.isArray(b.history) ? b.history : []).slice(-6).map(h => `${h.role === 'me' ? 'User' : 'AI'}: ${String(h.text || '').slice(0, 800)}`).join('\n');
+    const system = `You are the document and presentation helper inside the CIVIX app. ${DOC_MODES[mode]} Use simple, friendly English and short lines for a phone screen. Be honest: never invent content that is not in the material, and never praise without a reason. ${sawVisuals ? 'You may describe what you can actually see in the provided pages or photos.' : 'You only received extracted TEXT: do not claim to see pictures, charts or layout.'} If the material looks unclear or incomplete, say so.`;
+    const parts = blocks.slice();
+    parts.push({ type: 'text', text: `${material ? `MATERIAL (text, in order):\n${material}\n\n` : ''}${hist ? `Earlier in this chat:\n${hist}\n\n` : ''}${mode === 'ask' ? `Question: ${question}` : mode === 'check' ? `The user's explanation:\n${attempt}${question ? `\nAbout: ${question}` : ''}` : mode === 'examiner' ? 'Ask the 5 questions now.' : 'Summarise now.'}` });
+    const r = await claudeFetch(key, { max_tokens: mode === 'check' ? 1300 : 900, system, messages: [{ role: 'user', content: parts }] });
+    if (!r.ok) {
+      console.log('Doc AI error:', r.status, (await r.text().catch(() => '')).slice(0, 300));
+      return res.json({ error: r.status === 429 ? 'The AI is busy. Try again in a minute.' : 'The AI could not answer right now. Try again soon.' });
+    }
+    const j = await r.json();
+    const answer = (j.content || []).map(c => c.text || '').join('').trim();
+    if (!answer) return res.json({ error: 'The AI sent an empty answer. Try again.' });
+    res.json({ answer, sawVisuals });
+  } catch (e) {
+    console.log('Doc AI crash:', e.message);
+    res.json({ error: 'Something went wrong. Try a smaller file.' });
   }
 });
 
@@ -2911,16 +3075,10 @@ app.get('/api/play/ai', async (req, res) => {
   const p = playPrompt(kind, req.query);
   if (!p) return res.json({ error: 'kind' });
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
+    const r = await claudeFetch(key, {
         max_tokens: kind === 'story' ? 1500 : 1100,
-        temperature: 1,
         messages: [{ role: 'user', content: p.text }],
-      }),
-    });
+      });
     if (!r.ok) return res.json({ error: 'ai' });
     const j = await r.json();
     const data = playJson((j.content || []).map(c => c.text || '').join(''));
