@@ -3278,6 +3278,22 @@ a{display:inline-block;margin-top:18px;background:#FF2D78;color:#fff;text-decora
 <script>setTimeout(function(){location.href='civix://u/${name}'},300)</script></body></html>`);
 });
 
+// ---------- 🔐 Leaked-password check (k-anonymity) ----------
+// The app sends only the FIRST 5 letters of the password's SHA-1 hash – never the password.
+// We ask Have I Been Pwned for all leaked hashes starting with those 5 letters and return them;
+// the phone checks the rest itself. Nobody (not CIVIX, not HIBP) ever learns the password.
+app.get('/api/pwned/:prefix', async (req, res) => {
+  const prefix = String(req.params.prefix || '').toUpperCase();
+  if (!/^[0-9A-F]{5}$/.test(prefix)) return res.status(400).json({ error: 'bad prefix' });
+  try {
+    const r = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`, { headers: { 'Add-Padding': 'true', 'User-Agent': 'CIVIX' } });
+    if (!r.ok) return res.status(502).json({ error: 'unavailable' });
+    res.set('Cache-Control', 'no-store').type('text/plain').send(await r.text());
+  } catch {
+    res.status(502).json({ error: 'unavailable' });
+  }
+});
+
 // ---------- Invite links (part27.sql): /i/<code> opens CIVIX, or shows how to get it ----------
 app.get('/i/:code', (req, res) => {
   const code = String(req.params.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
