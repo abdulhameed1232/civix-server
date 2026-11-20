@@ -49,9 +49,7 @@ app.use((req, res, next) => {
   next();
 });
 app.use(cors());
-const smallJson = express.json({ limit: '10kb' });
-const bigJson = express.json({ limit: '14mb' });
-app.use((req, res, next) => (req.path === '/api/ai/doc' ? bigJson(req, res, next) : smallJson(req, res, next)));
+app.use(express.json({ limit: '10kb' }));
 
 const parser = new Parser({
   timeout: 15000,
@@ -2055,37 +2053,22 @@ app.post('/api/call-token', async (req, res) => {
 // ============================================================
 // Send to Expo push and write any problem in the logs (also checks the delivery receipts)
 async function sendExpoPush(messages, label) {
-  // Try twice (a short network hiccup or a busy Expo server must not mean "no call notification")
-  let sent = null, j = {};
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      sent = await fetch('https://exp.host/--/api/v2/push/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify(messages),
-      });
-      j = await sent.json().catch(() => ({}));
-      if (sent.ok || (sent.status < 500 && sent.status !== 429)) break;
-    } catch (e) {
-      sent = null;
-    }
-    await new Promise(r => setTimeout(r, 700));
-  }
-  if (!sent) { console.log(`Push ${label} error: could not reach Expo`); return; }
+  const sent = await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(messages),
+  });
+  const j = await sent.json().catch(() => ({}));
   if (!sent.ok) {
     console.log(`Push ${label} error:`, sent.status, JSON.stringify(j).slice(0, 300));
     return;
   }
   const tickets = Array.isArray(j.data) ? j.data : [];
   const ids = [];
-  const dead = [];
-  tickets.forEach((t, i) => {
-    if (t.status === 'error') {
-      console.log(`Push ${label} ticket error:`, t.message, t.details ? JSON.stringify(t.details) : '');
-      if (t.details && t.details.error === 'DeviceNotRegistered' && messages[i] && messages[i].to) dead.push(String(messages[i].to));
-    } else if (t.id) ids.push(t.id);
+  tickets.forEach(t => {
+    if (t.status === 'error') console.log(`Push ${label} ticket error:`, t.message, t.details ? JSON.stringify(t.details) : '');
+    else if (t.id) ids.push(t.id);
   });
-  dropDeadTokens(dead);
   console.log(`Push ${label}: ${tickets.length} sent`);
   if (!ids.length) return;
   // Ask Expo 15 seconds later whether Google really delivered it
@@ -2105,17 +2088,6 @@ async function sendExpoPush(messages, label) {
   }, 15000);
 }
 
-
-// Phones that told Expo "this app was removed / token is old" are deleted, so they stop wasting notification slots
-async function dropDeadTokens(tokens) {
-  const list = Array.from(new Set(tokens)).filter(t => /^ExponentPushToken\[[\w-]+\]$/.test(t));
-  if (!list.length || !SUPABASE_SECRET_KEY) return;
-  try {
-    const inList = list.map(t => `"${t}"`).join(',');
-    await fetch(`${SUPABASE_URL}/rest/v1/push_tokens?token=in.(${encodeURIComponent(inList)})`, { method: 'DELETE', headers: dbHeaders() });
-    console.log(`Removed ${list.length} dead push token(s)`);
-  } catch { }
-}
 
 // ---------- WhatsApp-style calls (part18.sql): which phones show the ringing call screen themselves ----------
 let callPushCfg = { at: 0, full: false, msg: false };
@@ -2635,77 +2607,6 @@ async function youtubeSearch(q, shortsOnly) {
   return rssToReels(out.map(x => ({ ...x, publishedAt: new Date().toISOString() })), { language: 'any', country: 'World', category: 'Entertainment', kind: 'creator' });
 }
 
-// ---------- DISCOVER: fresh photos for the Home feed ----------
-// Uses the keys you already have on Render: PEXELS_API_KEY, UNSPLASH_ACCESS_KEY, PIXABAY_API_KEY.
-// NASA picture of the day works with no key (NASA_API_KEY is optional and gives a higher limit).
-const NASA_API_KEY = process.env.NASA_API_KEY || 'DEMO_KEY';
-const DISCOVER_QUERY = {
-  World: 'world travel city', Politics: 'city skyline', Business: 'office workspace', Technology: 'technology gadgets',
-  Gaming: 'gaming setup', Sports: 'sports action', Science: 'science laboratory', Entertainment: 'concert stage lights',
-  Movies: 'cinema', Music: 'musician', Travel: 'travel landscape', Food: 'delicious food', Fashion: 'fashion style',
-  Art: 'art painting', Photography: 'street photography', Nature: 'nature landscape', Education: 'books study',
-};
-const DISCOVER_EXTRA = ['mountains', 'ocean sunset', 'architecture', 'wildlife', 'space galaxy', 'coffee', 'flowers', 'vintage cars', 'street food', 'northern lights'];
-const dRand = n => Math.floor(Math.random() * n);
-const dShuffle = a => { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = dRand(i + 1); [b[i], b[j]] = [b[j], b[i]]; } return b; };
-
-async function discoverPexels(q, topic) {
-  const page = 1 + dRand(8);
-  const data = await cached(`dpx:${q}:${page}`, 30 * 60 * 1000, async () => {
-    const r = await fetch(`https://api.pexels.com/v1/search?query=${encodeURIComponent(q)}&per_page=14&page=${page}`, { headers: { Authorization: PEXELS_API_KEY } });
-    if (!r.ok) throw new Error(`Pexels ${r.status}`);
-    return r.json();
-  });
-  return (data.photos || []).map(p => ({ id: `px-${p.id}`, imageUrl: p.src?.large || p.src?.medium, w: p.width, h: p.height, title: p.alt || q, credit: p.photographer, source: 'Pexels', link: p.url, topic }));
-}
-async function discoverUnsplash(q, topic) {
-  const page = 1 + dRand(8);
-  const data = await cached(`dun:${q}:${page}`, 30 * 60 * 1000, async () => {
-    const r = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(q)}&per_page=14&page=${page}&content_filter=high`, { headers: { Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}`, 'Accept-Version': 'v1' } });
-    if (!r.ok) throw new Error(`Unsplash ${r.status}`);
-    return r.json();
-  });
-  return (data.results || []).map(p => ({ id: `un-${p.id}`, imageUrl: p.urls?.regular, w: p.width, h: p.height, title: p.description || p.alt_description || q, credit: p.user?.name, source: 'Unsplash', link: p.links?.html, topic }));
-}
-async function discoverPixabay(q, topic) {
-  const page = 1 + dRand(6);
-  const data = await cached(`dpb:${q}:${page}`, 30 * 60 * 1000, async () => {
-    const r = await fetch(`https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${encodeURIComponent(q)}&image_type=photo&safesearch=true&per_page=16&page=${page}`);
-    if (!r.ok) throw new Error(`Pixabay ${r.status}`);
-    return r.json();
-  });
-  return (data.hits || []).map(p => ({ id: `pb-${p.id}`, imageUrl: p.largeImageURL || p.webformatURL, w: p.imageWidth, h: p.imageHeight, title: (p.tags || q).split(',').slice(0, 3).join(' · '), credit: p.user, source: 'Pixabay', link: p.pageURL, topic }));
-}
-async function discoverNasa() {
-  const data = await cached(`dnasa:${Math.floor(Date.now() / (20 * 60 * 1000))}`, 20 * 60 * 1000, async () => {
-    const r = await fetch(`https://api.nasa.gov/planetary/apod?api_key=${NASA_API_KEY}&count=3`);
-    if (!r.ok) throw new Error(`NASA ${r.status}`);
-    return r.json();
-  });
-  return (Array.isArray(data) ? data : []).filter(x => x.media_type === 'image' && (x.url || x.hdurl)).map(x => ({ id: `nasa-${x.date}-${(x.title || '').length}`, imageUrl: x.url || x.hdurl, w: 4, h: 3, title: x.title, credit: x.copyright ? String(x.copyright).replace(/\s+/g, ' ').trim() : 'NASA', source: 'NASA', link: `https://apod.nasa.gov/apod/ap${String(x.date || '').slice(2).replace(/-/g, '')}.html`, topic: 'Science' }));
-}
-app.get('/api/discover-feed', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  try {
-    const asked = String(req.query.topics || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 6);
-    const picks = dShuffle(asked.filter(t => DISCOVER_QUERY[t])).slice(0, 3).map(t => [DISCOVER_QUERY[t], t]);
-    picks.push([DISCOVER_EXTRA[dRand(DISCOVER_EXTRA.length)], 'Nature'], [DISCOVER_EXTRA[dRand(DISCOVER_EXTRA.length)], 'Photography']);
-    const providers = [];
-    if (PEXELS_API_KEY) providers.push(discoverPexels);
-    if (UNSPLASH_ACCESS_KEY) providers.push(discoverUnsplash);
-    if (PIXABAY_API_KEY) providers.push(discoverPixabay);
-    const jobs = providers.length ? picks.slice(0, 5).map(([q, t], i) => providers[(i + dRand(providers.length)) % providers.length](q, t).catch(() => [])) : [];
-    if (Math.random() < 0.5) jobs.push(discoverNasa().catch(() => []));
-    const lists = await Promise.all(jobs);
-    const seen = new Set();
-    const items = dShuffle(lists.flat()).filter(x => x && x.imageUrl && !seen.has(x.id) && seen.add(x.id));
-    const n = Math.max(4, Math.min(24, Number(req.query.n) || 12));
-    res.json({ items: items.slice(0, n), sources: providers.length + 1 });
-  } catch (e) {
-    res.json({ items: [], error: String(e.message || e) });
-  }
-});
-
 app.get('/api/video-search', async (req, res) => {
   const q = cleanQ(req.query.q);
   if (q.length < 2) return res.json({ items: [] });
@@ -2774,40 +2675,6 @@ async function wikiSummary(q) {
 }
 
 // ---------- Ask CIVIX: answer + videos + news ----------
-// ---------- Talking to Claude: tries a list of model names, so one retired name never switches the AI off ----------
-let GOOD_MODEL = null;
-async function claudeFetch(key, payload) {
-  const list = [GOOD_MODEL, process.env.ANTHROPIC_MODEL, 'claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5']
-    .filter((m, i, a) => m && a.indexOf(m) === i);
-  let last = null;
-  for (const model of list) {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ ...payload, model }),
-    });
-    last = r;
-    if (r.ok) { GOOD_MODEL = model; return r; }
-    if (r.status === 404 || r.status === 400) continue; // wrong or retired model name: try the next one
-    return r; // bad key, too many requests, busy: another model will not help
-  }
-  return last;
-}
-// Open this in Chrome to see exactly why the AI works or not (it never shows the key)
-app.get('/api/ai/health', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  if (hubTooMany(req)) return res.status(429).json({ error: 'Please wait a minute.' });
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return res.json({ ok: false, problem: 'ANTHROPIC_API_KEY is not set on this server (Render → Environment).' });
-  try {
-    const r = await claudeFetch(key, { max_tokens: 16, messages: [{ role: 'user', content: 'Say OK' }] });
-    const body = await r.json().catch(() => ({}));
-    res.json({ ok: r.ok, status: r.status, model: GOOD_MODEL, problem: r.ok ? null : ((body.error && body.error.message) || 'unknown') });
-  } catch (e) {
-    res.json({ ok: false, problem: 'Could not reach the AI service: ' + e.message });
-  }
-});
-
 async function aiAnswer(q, wiki, news) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return null;
@@ -2815,17 +2682,19 @@ async function aiAnswer(q, wiki, news) {
     wiki ? `Wikipedia: ${wiki.text}` : '',
     ...news.slice(0, 6).map(n => `News (${n.source}): ${n.title}`),
   ].filter(Boolean).join('\n');
-  const r = await claudeFetch(key, {
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
       max_tokens: 400,
       messages: [{
         role: 'user',
         content: `Answer this question for a social app user in simple English, in at most 6 short sentences. Use the context when it helps. If you are not sure, say so.\n\nContext:\n${context}\n\nQuestion: ${q}`,
       }],
-    });
-  if (!r.ok) {
-    console.log('AI answer error:', r.status, (await r.text().catch(() => '')).slice(0, 300));
-    return null;
-  }
+    }),
+  });
+  if (!r.ok) return null;
   const j = await r.json();
   const text = (j.content || []).map(c => c.text || '').join('').trim();
   return text || null;
@@ -2842,13 +2711,18 @@ app.get('/api/explain', async (req, res) => {
   if (!key) return res.json({ error: 'Explain is not switched on yet.' });
   try {
     const text = await cached(`explain:${title.toLowerCase()}`, 12 * 60 * 60 * 1000, async () => {
-      const r = await claudeFetch(key, {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5',
           max_tokens: 350,
           messages: [{
             role: 'user',
             content: `A user of a social app opened this news headline and wants it explained simply.\nHeadline: ${title}\nSource: ${source}\n${desc ? `Summary from the source: ${desc}\n` : ''}\nWrite 3 to 5 very short bullet points in simple English: what happened, why it matters, and any background term explained. Only use what the headline and summary say plus well-known background; do not invent new facts, numbers or quotes. If the headline alone is not enough, say what is unclear.`,
           }],
-        });
+        }),
+      });
       if (!r.ok) throw new Error('ai ' + r.status);
       const j = await r.json();
       const t = (j.content || []).map(c => c.text || '').join('').trim();
@@ -2861,230 +2735,23 @@ app.get('/api/explain', async (req, res) => {
   }
 });
 
-const AI_CACHE = new Map();
 app.get('/api/ask', async (req, res) => {
   const q = cleanQ(req.query.q);
   if (q.length < 2) return res.json({});
   if (hubTooMany(req)) return res.status(429).json({ error: 'Too many searches. Please wait a minute.' });
   try {
-    const base = await cached(`askbase:${q.toLowerCase()}`, 30 * 60 * 1000, async () => {
+    const out = await cached(`ask:${q.toLowerCase()}`, 30 * 60 * 1000, async () => {
       const [wiki, news, videos] = await Promise.all([
         wikiSummary(q).catch(() => null),
         newsSearch(q).catch(() => []),
         youtubeSearch(q, false).catch(() => []),
       ]);
-      return { q, wiki, news: news.slice(0, 12), videos: videos.slice(0, 30) };
+      const ai = await aiAnswer(q, wiki, news).catch(() => null);
+      return { q, ai, wiki, news: news.slice(0, 12), videos: videos.slice(0, 30) };
     });
-    // The AI answer is cached only when it worked (a missing key or a hiccup must not stick for 30 minutes)
-    const k = q.toLowerCase();
-    let ai = null;
-    const hit = AI_CACHE.get(k);
-    if (hit && Date.now() - hit.t < 30 * 60 * 1000) ai = hit.text;
-    else {
-      ai = await aiAnswer(q, base.wiki, base.news).catch(() => null);
-      if (ai) { AI_CACHE.set(k, { t: Date.now(), text: ai }); if (AI_CACHE.size > 400) AI_CACHE.clear(); }
-    }
-    res.json({ ...base, ai, aiOff: !process.env.ANTHROPIC_API_KEY });
+    res.json(out);
   } catch {
     res.json({ q, error: 'Search is not available right now' });
-  }
-});
-
-// ---------- 📄 Document chat + presentation coach (inside Ask CIVIX AI) ----------
-// Nothing is stored: the file is read, sent to the AI for this one answer, then forgotten.
-const zlib = require('zlib');
-function unzipEntries(buf) {
-  // Minimal ZIP reader (PPTX and DOCX are zip files). No extra packages needed.
-  let e = -1;
-  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 70000); i--) { if (buf.readUInt32LE(i) === 0x06054b50) { e = i; break; } }
-  if (e < 0) throw new Error('not a zip');
-  const count = buf.readUInt16LE(e + 10);
-  let p = buf.readUInt32LE(e + 16);
-  const out = {};
-  for (let k = 0; k < count && k < 3000; k++) {
-    if (buf.readUInt32LE(p) !== 0x02014b50) break;
-    const method = buf.readUInt16LE(p + 10);
-    const csize = buf.readUInt32LE(p + 20);
-    const nlen = buf.readUInt16LE(p + 28), xlen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32);
-    const off = buf.readUInt32LE(p + 42);
-    const name = buf.toString('utf8', p + 46, p + 46 + nlen);
-    p += 46 + nlen + xlen + clen;
-    if (!/^(ppt\/slides\/slide\d+\.xml|ppt\/notesSlides\/notesSlide\d+\.xml|word\/document\.xml)$/.test(name)) continue;
-    const ds = off + 30 + buf.readUInt16LE(off + 26) + buf.readUInt16LE(off + 28);
-    const raw = buf.slice(ds, ds + csize);
-    out[name] = (method === 8 ? zlib.inflateRawSync(raw, { maxOutputLength: 6 * 1024 * 1024 }) : raw).toString('utf8');
-  }
-  return out;
-}
-const xmlText = s => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
-function officeText(buf, kind) {
-  const files = unzipEntries(buf);
-  if (kind === 'docx') {
-    const x = files['word/document.xml'] || '';
-    return xml_paras(x, /<w:p[ >][\s\S]*?<\/w:p>/g, /<w:t[^>]*>([\s\S]*?)<\/w:t>/g).join('\n');
-  }
-  const num = n => parseInt(n.match(/(\d+)\.xml$/)[1], 10);
-  const slides = Object.keys(files).filter(n => n.startsWith('ppt/slides/')).sort((a, b) => num(a) - num(b));
-  const notes = {};
-  Object.keys(files).filter(n => n.startsWith('ppt/notesSlides/')).forEach(n => { notes[num(n)] = files[n]; });
-  return slides.map(n => {
-    const i = num(n);
-    const body = xml_paras(files[n], /<a:p>[\s\S]*?<\/a:p>/g, /<a:t>([\s\S]*?)<\/a:t>/g).join('\n');
-    const nt = notes[i] ? xml_paras(notes[i], /<a:p>[\s\S]*?<\/a:p>/g, /<a:t>([\s\S]*?)<\/a:t>/g).join(' ') : '';
-    return `--- Slide ${i} ---\n${body}${nt ? `\n(Speaker notes: ${nt})` : ''}`;
-  }).join('\n\n');
-}
-function xml_paras(xml, paraRe, textRe) {
-  const out = [];
-  (xml.match(paraRe) || []).forEach(p => {
-    const parts = [];
-    let m;
-    textRe.lastIndex = 0;
-    while ((m = textRe.exec(p))) parts.push(xmlText(m[1]));
-    const t = parts.join('').trim();
-    if (t) out.push(t);
-  });
-  return out;
-}
-
-const docTries = new Map();
-function docTooMany(uid) {
-  const now = Date.now();
-  const list = (docTries.get(uid) || []).filter(t => now - t < 24 * 3600 * 1000);
-  const recent = list.filter(t => now - t < 10 * 60 * 1000).length;
-  if (recent >= 8 || list.length >= 30) return true; // 8 per 10 minutes, 30 per day per person (keeps the AI bill under control)
-  list.push(now);
-  docTries.set(uid, list);
-  if (docTries.size > 5000) docTries.clear();
-  return false;
-}
-const DOC_MODES = {
-  ask: 'Answer the user\'s question using ONLY the material. If the material does not say it, say so clearly instead of guessing.',
-  summary: 'Summarise the material in short sections (slide by slide or page by page if it has them). Keep each section to 1 or 2 lines. Finish with the 3 most important points.',
-  examiner: 'Act as a fair presentation examiner. Ask exactly 5 short questions about the material, from easy to hard, numbered. Do not give the answers yet.',
-  check: 'The user wrote or said an explanation of (part of) the material. Compare it with the material and give honest feedback in these short sections: ✅ Correct and clear, ⚠️ Missing important points, ❌ Mistakes compared with the material (quote what the material says), ✍️ Language suggestions (grammar, repetition, filler words), 💡 One improved version of their weakest sentence, 🎯 What to practise next. Never invent mistakes. A different but valid explanation is NOT a mistake. If something is only a style choice, say it is optional.',
-};
-app.post('/api/ai/doc', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  try {
-    const auth = String(req.headers.authorization || '');
-    if (!/^Bearer \S+$/.test(auth)) return res.status(401).json({ error: 'Please sign in' });
-    const key = process.env.ANTHROPIC_API_KEY;
-    if (!key) return res.json({ error: 'The AI is switched off on the server (no AI key).' });
-    const u = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_KEY, Authorization: auth } });
-    if (!u.ok) return res.status(401).json({ error: 'Please sign in again' });
-    const uid = (await u.json()).id;
-    if (!uid) return res.status(401).json({ error: 'Please sign in again' });
-    if (docTooMany(uid)) return res.status(429).json({ error: 'You have used the document AI a lot. Please try again later (limit: 8 every 10 minutes, 30 a day).' });
-
-    const b = req.body || {};
-    const mode = DOC_MODES[b.mode] ? b.mode : 'ask';
-    const question = String(b.question || '').slice(0, 1500);
-    const attempt = String(b.attempt || '').slice(0, 6000);
-    const blocks = [];
-    let material = String(b.text || '').slice(0, 60000);
-    let sawVisuals = false;
-
-    if (b.file && typeof b.file.b64 === 'string') {
-      const kind = String(b.file.kind || '');
-      if (b.file.b64.length > 13 * 1024 * 1024) return res.json({ error: 'That file is too big (limit about 9 MB).' });
-      const buf = Buffer.from(b.file.b64, 'base64');
-      if (kind === 'pdf') {
-        if (buf.slice(0, 5).toString() !== '%PDF-') return res.json({ error: 'That does not look like a PDF.' });
-        blocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b.file.b64 } });
-        sawVisuals = true;
-      } else if (kind === 'pptx' || kind === 'docx') {
-        try { material = (officeText(buf, kind) + '\n' + material).slice(0, 60000); } catch { return res.json({ error: `I could not read that ${kind.toUpperCase()} file. Try saving it again, or export it as a PDF.` }); }
-        if (material.trim().length < 20) return res.json({ error: 'I found almost no text in that file. If it is mostly pictures, export it as a PDF or add photos of the pages.' });
-      } else return res.json({ error: 'That file type is not supported. Use PDF, PPTX, DOCX or paste the text.' });
-    }
-    const imgs = Array.isArray(b.images) ? b.images.slice(0, 4) : [];
-    for (const im of imgs) {
-      const mime = String(im.mime || 'image/jpeg');
-      if (!/^image\/(jpeg|png|webp)$/.test(mime) || typeof im.b64 !== 'string' || im.b64.length > 5.5 * 1024 * 1024) return res.json({ error: 'One of the photos is too big or not supported.' });
-      blocks.push({ type: 'image', source: { type: 'base64', media_type: mime, data: im.b64 } });
-      sawVisuals = true;
-    }
-    if (!blocks.length && material.trim().length < 20) return res.json({ error: 'Add your material first (paste text, choose a file, or pick photos of the pages).' });
-    if (mode === 'ask' && question.length < 2) return res.json({ error: 'Type your question.' });
-    if (mode === 'check' && attempt.trim().length < 15) return res.json({ error: 'Write (or paste) your explanation first. It needs at least a couple of sentences.' });
-
-    const hist = (Array.isArray(b.history) ? b.history : []).slice(-6).map(h => `${h.role === 'me' ? 'User' : 'AI'}: ${String(h.text || '').slice(0, 800)}`).join('\n');
-    const system = `You are the document and presentation helper inside the CIVIX app. ${DOC_MODES[mode]} Use simple, friendly English and short lines for a phone screen. Be honest: never invent content that is not in the material, and never praise without a reason. ${sawVisuals ? 'You may describe what you can actually see in the provided pages or photos.' : 'You only received extracted TEXT: do not claim to see pictures, charts or layout.'} If the material looks unclear or incomplete, say so.`;
-    const parts = blocks.slice();
-    parts.push({ type: 'text', text: `${material ? `MATERIAL (text, in order):\n${material}\n\n` : ''}${hist ? `Earlier in this chat:\n${hist}\n\n` : ''}${mode === 'ask' ? `Question: ${question}` : mode === 'check' ? `The user's explanation:\n${attempt}${question ? `\nAbout: ${question}` : ''}` : mode === 'examiner' ? 'Ask the 5 questions now.' : 'Summarise now.'}` });
-    const r = await claudeFetch(key, { max_tokens: mode === 'check' ? 1300 : 900, system, messages: [{ role: 'user', content: parts }] });
-    if (!r.ok) {
-      console.log('Doc AI error:', r.status, (await r.text().catch(() => '')).slice(0, 300));
-      return res.json({ error: r.status === 429 ? 'The AI is busy. Try again in a minute.' : 'The AI could not answer right now. Try again soon.' });
-    }
-    const j = await r.json();
-    const answer = (j.content || []).map(c => c.text || '').join('').trim();
-    if (!answer) return res.json({ error: 'The AI sent an empty answer. Try again.' });
-    res.json({ answer, sawVisuals });
-  } catch (e) {
-    console.log('Doc AI crash:', e.message);
-    res.json({ error: 'Something went wrong. Try a smaller file.' });
-  }
-});
-
-// ---------- CIVIX Play: fresh AI-made game content (clearly labelled in the app; the app has an offline set too) ----------
-const playTries = new Map();
-function playTooMany(req) {
-  const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
-  const now = Date.now();
-  const list = (playTries.get(ip) || []).filter(t => now - t < 60 * 1000);
-  list.push(now);
-  playTries.set(ip, list);
-  if (playTries.size > 5000) playTries.clear();
-  return list.length > 14;
-}
-const PLAY_TOPICS = ['Science', 'Geography', 'Sports', 'Movies', 'Food', 'Tech', 'History', 'Animals', 'India', 'Dubai & UAE', 'Space', 'Music'];
-function playPrompt(kind, q) {
-  const topic = PLAY_TOPICS.includes(q.topic) ? q.topic : PLAY_TOPICS[Math.floor(Math.random() * PLAY_TOPICS.length)];
-  const name = String(q.name || 'my friend').replace(/[^A-Za-z\u00C0-\u024F\u0600-\u06FF\u0900-\u097F\u0C00-\u0C7F ]/g, '').trim().slice(0, 20) || 'my friend';
-  const seed = `Variety seed: ${String(q.seed || '').slice(0, 12)}.`;
-  const safe = 'Family-friendly, kind, no politics, no religion, no insults about looks, body, race, health or family. ';
-  const J = 'Reply with ONLY valid JSON, no markdown, no extra words. ';
-  switch (kind) {
-    case 'quiz': return { n: 8, text: `${J}${safe}Write 8 multiple-choice trivia questions about "${topic}" for a general audience, medium difficulty, only facts that are certain and well known. Format: [{"q":"question","a":["correct","wrong","wrong","wrong"],"c":0}]. The correct answer is ALWAYS the first item in "a". ${seed}`, topic };
-    case 'emoji': return { n: 8, text: `${J}${safe}Write 8 "guess the movie from emojis" puzzles using famous well-known films. Format: [{"e":"2 to 4 emojis","a":"Movie title"}]. ${seed}` };
-    case 'wyr': return { n: 8, text: `${J}${safe}Write 8 fun, light "Would you rather" pairs. Format: [["option one","option two"]]. ${seed}` };
-    case 'caption': return { n: 8, text: `${J}${safe}Write 8 short, funny, everyday photo situations described in one sentence each, for a caption contest. Format: ["situation"]. ${seed}` };
-    case 'guess': return { n: 5, text: `${J}${safe}Write 5 "Guess who or what" puzzles about famous people, places or things (only certain, well-known facts). Each has 4 clues from hard to easy. Format: [{"a":"answer","clues":["hard","medium","easy","very easy"]}]. ${seed}` };
-    case 'roast': return { n: 1, text: `${J}${safe}Write ONE short, ${q.mode === 'roast' ? 'playful and gentle teasing line about everyday harmless habits (being late, snacks, phone battery), never about looks or personal traits' : 'warm and sincere compliment'} for a friend called ${name}. Max 22 words. Format: {"line":"..."}. ${seed}` };
-    case 'mystery': return { n: 1, text: `${J}${safe}Write one tiny gentle detective mystery with a harmless, funny solution (nobody is hurt, no crime scenes). Format: {"title":"","setting":"one sentence","clues":["clue1","clue2","clue3"],"suspects":["s1","s2","s3","s4"],"ans":0,"reveal":"one or two sentences"}. "ans" is the index of the right suspect and the clues must lead to it. ${seed}` };
-    case 'story': return { n: 1, text: `${J}${safe}Write a short interactive story with choices. Format: {"title":"","start":"a","nodes":{"a":{"t":"2 sentences","c":[["choice one","b"],["choice two","c"]]},"b":{...},"c":{...},"d":{"t":"...","end":"emoji + Ending: title"}}}. Use 7 nodes (a to g): a has 2 choices leading to b and c, b and c each have 2 choices leading to d, e, f, g, and d to g are endings with an "end" field and no "c". ${seed}` };
-    default: return null;
-  }
-}
-function playJson(text) {
-  const t = String(text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
-  const a = t.search(/[\[{]/);
-  if (a < 0) throw new Error('no json');
-  const open = t[a], close = open === '[' ? ']' : '}';
-  const b = t.lastIndexOf(close);
-  return JSON.parse(t.slice(a, b + 1));
-}
-app.get('/api/play/ai', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  const kind = String(req.query.kind || '');
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return res.json({ error: 'off' });
-  if (playTooMany(req)) return res.status(429).json({ error: 'busy' });
-  const p = playPrompt(kind, req.query);
-  if (!p) return res.json({ error: 'kind' });
-  try {
-    const r = await claudeFetch(key, {
-        max_tokens: kind === 'story' ? 1500 : 1100,
-        messages: [{ role: 'user', content: p.text }],
-      });
-    if (!r.ok) return res.json({ error: 'ai' });
-    const j = await r.json();
-    const data = playJson((j.content || []).map(c => c.text || '').join(''));
-    res.json({ kind, topic: p.topic || '', data });
-  } catch {
-    res.json({ error: 'ai' });
   }
 });
 
@@ -3611,6 +3278,24 @@ a{display:inline-block;margin-top:18px;background:#FF2D78;color:#fff;text-decora
 <script>setTimeout(function(){location.href='civix://u/${name}'},300)</script></body></html>`);
 });
 
+// ---------- Invite links (part27.sql): /i/<code> opens CIVIX, or shows how to get it ----------
+app.get('/i/:code', (req, res) => {
+  const code = String(req.params.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+  res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>You're invited to CIVIX</title>
+<meta property="og:title" content="You're invited to CIVIX 💛"><meta property="og:description" content="The private app for your family and close friends.">
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#07060B;color:#fff;font-family:-apple-system,Segoe UI,Roboto,sans-serif;text-align:center}
+.c{padding:28px;max-width:420px}.l{width:84px;height:84px;border-radius:24px;margin:0 auto 18px;background:linear-gradient(45deg,#FF8A00,#FF2D78 55%,#7B2FF7);display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:900}
+a{display:block;margin-top:14px;background:#FF2D78;color:#fff;text-decoration:none;font-weight:800;padding:15px 26px;border-radius:14px}a.s{background:#1C1A26}
+p{color:#aaa;line-height:1.5}.code{font-size:26px;letter-spacing:4px;font-weight:900;background:#16151F;border-radius:14px;padding:14px;margin:18px 0}</style></head>
+<body><div class="c"><div class="l">C</div><h2>You're invited to CIVIX 💛</h2><p>The private place for your family and close friends: posts, stories, chats and calls.</p>
+<div class="code">${code}</div>
+<a href="civix://invite/${code}">I have CIVIX – open it</a>
+<a class="s" href="/download">Get CIVIX (Android)</a>
+<p style="margin-top:20px;font-size:13px">After installing, sign up, then open this link again – or type the code in CIVIX: Profile → Settings → "I have an invite code".</p></div>
+<script>setTimeout(function(){location.href='civix://invite/${code}'},400)</script></body></html>`);
+});
+
 // ---------- Scheduled chat messages: send the ones whose time has come (every minute) ----------
 async function sendDueMessages() {
   if (!SUPABASE_SECRET_KEY) return;
@@ -3829,15 +3514,14 @@ app.get('/api/podcasts/episodes', async (req, res) => {
 
 // ============================================================
 // 🔔 Daily CIVIX notifications (part22.sql) – 3 or 4 a day, each one only once a day.
-// Times (UTC): 05:00 goals · 08:00 cooking idea · 09:30 news · 14:00 quiz (every 2nd day) · 17:00 "your day" (only if you got likes/comments).
+// Times (UTC): 05:00 goals · 09:30 news · 14:00 quiz · 17:00 "your day" (only if you got likes/comments).
 // That is 9:00 / 13:30 / 18:00 / 21:00 in Dubai (10:30 / 15:00 / 19:30 / 22:30 in India).
 // Anyone can turn them off: Profile → Settings → Daily notifications.
 // ============================================================
 const DAILY_SLOTS = [
   { slot: 'goals', h: 5, m: 0 },
   { slot: 'news', h: 9, m: 30 },
-  { slot: 'food', h: 8, m: 0 },
-  { slot: 'quiz', h: 14, m: 0, every: 2 }, // every second day, so people are not flooded
+  { slot: 'quiz', h: 14, m: 0 },
   { slot: 'digest', h: 17, m: 0 },
 ];
 const GOAL_TIPS = [
@@ -3892,20 +3576,6 @@ async function sendDaily(slot) {
       id: top.id, title: top.title, link: top.link, source: top.source, imageUrl: top.imageUrl || null,
       publishedAt: top.publishedAt, description: String(top.description || '').slice(0, 300), language: top.language || 'en', category: top.category || 'News',
     };
-  } else if (slot === 'food') {
-    // The same dish as the recipe card in the app today
-    const day = new Date().toISOString().slice(0, 10);
-    let meal = null;
-    try {
-      meal = await cached(`recipe:${day}`, 24 * 60 * 60 * 1000, async () => {
-        const j = await getJson(`${MEALDB}/random.php`);
-        return j.meals && j.meals[0] ? mealOut(j.meals[0]) : null;
-      });
-    } catch { }
-    if (!meal || !meal.name) return 0;
-    title = '🍳 Today’s cooking idea';
-    body = `${meal.name}${meal.area && meal.area !== 'Unknown' ? ` (${meal.area})` : ''}: tap to see the recipe`;
-    open = 'hub';
   } else if (slot === 'quiz') {
     title = '🧠 Today’s quiz is ready';
     body = '5 quick questions – can you get them all right? See the leaderboard!';
@@ -3925,7 +3595,6 @@ async function runDaily() {
   for (const s of DAILY_SLOTS) {
     const at = s.h * 60 + s.m;
     if (mins < at || mins > at + 50) continue; // only in its time window (not hours later after a restart)
-    if (s.every && Math.floor(Date.now() / 86400000) % s.every !== 0) continue;
     try {
       if (!(await claimSlot(day, s.slot))) continue;
       const n = await sendDaily(s.slot);
