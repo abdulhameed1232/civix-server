@@ -2105,13 +2105,23 @@ async function fullCallOn(kind = 'call') {
   }
   return kind === 'message' ? callPushCfg.msg : callPushCfg.full;
 }
+// Remember for 10 minutes which phones can unlock messages themselves (one database trip less per message)
+const fullTokenCache = new Map(); // token -> { full, at }
 async function fullCallTokens(tokens, kind = 'call') {
   if (!tokens.length || !(await fullCallOn(kind))) return new Set();
+  const now = Date.now();
+  const known = tokens.filter(t => (fullTokenCache.get(t) || { at: 0 }).at > now - 10 * 60 * 1000);
+  if (known.length === tokens.length) return new Set(known.filter(t => fullTokenCache.get(t).full));
   try {
     const list = tokens.map(t => `"${String(t).replace(/"/g, '')}"`).join(',');
     const r = await fetch(`${SUPABASE_URL}/rest/v1/push_tokens?select=token&full_call=is.true&token=in.(${encodeURIComponent(list)})`, { headers: dbHeaders() });
     const j = r.ok ? await r.json() : [];
-    return new Set(j.map(x => x.token));
+    const full = new Set(j.map(x => x.token));
+    if (r.ok) {
+      if (fullTokenCache.size > 20000) fullTokenCache.clear();
+      tokens.forEach(t => fullTokenCache.set(t, { full: full.has(t), at: now }));
+    }
+    return full;
   } catch {
     return new Set();
   }
@@ -2211,6 +2221,7 @@ app.post('/api/notify', async (req, res) => {
         .catch(() => { });
       return;
     }
+    // (the "unlock on the phone" check runs at the same time as the switch lookup, see fullCallTokens cache)
     const full = type === 'message' ? await fullCallTokens(rows.map(x => x.token), type) : new Set();
     // Phones that unlock messages themselves get a silent signal (the message is opened on the phone, not here)
     const messages = rows.slice(0, 20).map(x => full.has(x.token)
@@ -2468,15 +2479,44 @@ app.get('/download', async (req, res) => {
     if (pick && pick.value && /^https:\/\//.test(pick.value.url || '')) { url = pick.value.url; version = pick.value.version || ''; }
   } catch { }
   const safe = s => String(s).replace(/[<>"']/g, '');
-  res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Download CIVIX</title>
-<style>body{margin:0;font-family:system-ui,sans-serif;background:linear-gradient(165deg,#3B1766,#120A1C 40%,#07060B);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center}
-.c{max-width:420px;padding:28px;text-align:center}.logo{font-weight:900;letter-spacing:10px;font-size:34px}.logo b{color:#FF2D78}
-a.btn{display:block;margin:26px 0 18px;padding:18px;border-radius:20px;color:#fff;text-decoration:none;font-weight:900;font-size:20px;background:linear-gradient(90deg,#FF8A00,#FF2D78,#7B2FF7)}
-ol{text-align:left;color:#ddd;line-height:1.7;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:16px 16px 16px 34px}.m{color:#9a95ab;font-size:13px}</style></head>
-<body><div class="c"><div class="logo">CIVIX<b>.</b></div><p class="m">Your people, your interests, your world.</p>
-${url ? `<a class="btn" href="${safe(url)}">⬇ Download CIVIX${version ? ' ' + safe(version) : ''}</a>
-<ol><li>Tap the button above. The app file downloads.</li><li>Open the downloaded file (tap the notification, or Files → Downloads).</li><li>If the phone asks, allow <b>"Install unknown apps"</b> for Chrome / Files.</li><li>Tap <b>Install</b>, then <b>Open</b>.</li><li>Inside CIVIX, new features arrive by themselves – no need to download again.</li></ol>
-<p class="m">Android phones only. CIVIX is free, has no ads and never asks for money.</p>` : `<p>The download link is not set yet.</p>`}
+  // Black page with the CX mark (it draws itself), same look as the app
+  res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#000000"><title>Download CIVIX</title>
+<meta property="og:title" content="CIVIX"><meta property="og:description" content="Your people, your interests, your world. Free, no ads.">
+<style>
+*{box-sizing:border-box}html,body{margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+body{min-height:100vh;display:flex;align-items:center;justify-content:center}
+.c{width:100%;max-width:420px;padding:40px 24px;text-align:center}
+.mark{width:112px;height:112px;margin:0 auto 22px;display:block}
+.mark path{fill:none;stroke:#fff}
+.arc{stroke-width:12.5;stroke-dasharray:150;stroke-dashoffset:150;animation:draw .9s .15s cubic-bezier(.6,0,.2,1) forwards}
+.x1,.x2{stroke-width:10;stroke-linecap:square;stroke-dasharray:32;stroke-dashoffset:32}
+.x1{animation:draw .35s .95s ease-out forwards}.x2{animation:draw .35s 1.15s ease-out forwards}
+@keyframes draw{to{stroke-dashoffset:0}}
+.word{font-weight:300;letter-spacing:12px;font-size:30px;margin-left:12px;opacity:0;animation:up .6s 1.4s ease-out forwards}
+.word b{color:#FF2D78;font-weight:700}
+.tag{color:#8B8B93;font-size:14px;margin:10px 0 0;opacity:0;animation:up .6s 1.6s ease-out forwards}
+@keyframes up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.rest{opacity:0;animation:up .6s 1.8s ease-out forwards}
+a.btn{display:block;margin:34px 0 10px;padding:18px;border-radius:16px;background:#fff;color:#000;text-decoration:none;font-weight:800;font-size:18px}
+a.btn:active{transform:scale(.98)}
+.v{color:#8B8B93;font-size:12px}
+ol{list-style:none;counter-reset:s;text-align:left;margin:28px 0 0;padding:0;border-top:1px solid #1A1A1C}
+li{counter-increment:s;display:flex;gap:14px;padding:14px 2px;border-bottom:1px solid #1A1A1C;color:#D8D8DE;font-size:15px;line-height:1.45}
+li:before{content:counter(s);flex:0 0 26px;height:26px;border-radius:13px;border:1px solid #3A3A3E;color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center}
+li b{color:#fff}.m{color:#6E6E76;font-size:12px;margin-top:22px;line-height:1.5}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;opacity:1!important;stroke-dashoffset:0!important}}
+</style></head>
+<body><div class="c">
+<svg class="mark" viewBox="0 0 128 120" aria-label="CIVIX"><g transform="translate(4 0)">
+<path class="arc" d="M79.6 38.4 A30 30 0 1 0 79.6 81.6"/><path class="x1" d="M61 49 L83 71"/><path class="x2" d="M83 49 L61 71"/></g></svg>
+<div class="word">CIVIX<b>.</b></div>
+<p class="tag">Your people, your interests, your world.</p>
+<div class="rest">
+${url ? `<a class="btn" href="${safe(url)}">Download for Android</a><div class="v">${version ? 'Version ' + safe(version) + ' · ' : ''}Free · No ads</div>
+<ol><li><span>Tap <b>Download for Android</b>.</span></li><li><span>Open the downloaded file (tap the notification, or Files → Downloads).</span></li><li><span>If the phone asks, allow <b>Install unknown apps</b> – only this once.</span></li><li><span>Tap <b>Install</b>, then <b>Open</b>.</span></li></ol>
+<p class="m">After this, new features arrive inside CIVIX by themselves.<br>CIVIX never asks for money or bank details.</p>` : `<p class="m">The download link is not ready yet. Please try again later.</p>`}
+</div>
 </div></body></html>`);
 });
 
