@@ -2105,23 +2105,13 @@ async function fullCallOn(kind = 'call') {
   }
   return kind === 'message' ? callPushCfg.msg : callPushCfg.full;
 }
-// Remember for 10 minutes which phones can unlock messages themselves (one database trip less per message)
-const fullTokenCache = new Map(); // token -> { full, at }
 async function fullCallTokens(tokens, kind = 'call') {
   if (!tokens.length || !(await fullCallOn(kind))) return new Set();
-  const now = Date.now();
-  const known = tokens.filter(t => (fullTokenCache.get(t) || { at: 0 }).at > now - 10 * 60 * 1000);
-  if (known.length === tokens.length) return new Set(known.filter(t => fullTokenCache.get(t).full));
   try {
     const list = tokens.map(t => `"${String(t).replace(/"/g, '')}"`).join(',');
     const r = await fetch(`${SUPABASE_URL}/rest/v1/push_tokens?select=token&full_call=is.true&token=in.(${encodeURIComponent(list)})`, { headers: dbHeaders() });
     const j = r.ok ? await r.json() : [];
-    const full = new Set(j.map(x => x.token));
-    if (r.ok) {
-      if (fullTokenCache.size > 20000) fullTokenCache.clear();
-      tokens.forEach(t => fullTokenCache.set(t, { full: full.has(t), at: now }));
-    }
-    return full;
+    return new Set(j.map(x => x.token));
   } catch {
     return new Set();
   }
@@ -2151,7 +2141,7 @@ app.post('/api/test-push', async (req, res) => {
         body: kind === 'call' ? 'If you see this with CIVIX closed, calls will reach you.' : 'If you see this with CIVIX closed, notifications work!',
         sound: 'default',
         priority: 'high',
-        channelId: kind === 'call' ? 'calls_ring' : 'messages',
+        channelId: kind === 'call' ? 'calls_ring_v2' : 'messages',
         data: { type: 'test' },
       }], 'test').catch(e => console.log('Push test error:', e.message));
     }, 10000);
@@ -2208,7 +2198,7 @@ app.post('/api/notify', async (req, res) => {
     // then also wake CIVIX on phones that can show the looping ringtone (it replaces the first one)
     if (type === 'call') {
       const now = rows.slice(0, 20).map(x => ({
-        to: x.token, title: x.title, body: x.body, sound: 'default', priority: 'high', channelId: 'calls_ring',
+        to: x.token, title: x.title, body: x.body, sound: 'default', priority: 'high', channelId: 'calls_ring_v2',
         data: { type, ref: x.ref }, categoryId: 'call', ttl: 60,
       }));
       await sendExpoPush(now, type);
@@ -2221,7 +2211,6 @@ app.post('/api/notify', async (req, res) => {
         .catch(() => { });
       return;
     }
-    // (the "unlock on the phone" check runs at the same time as the switch lookup, see fullCallTokens cache)
     const full = type === 'message' ? await fullCallTokens(rows.map(x => x.token), type) : new Set();
     // Phones that unlock messages themselves get a silent signal (the message is opened on the phone, not here)
     const messages = rows.slice(0, 20).map(x => full.has(x.token)
@@ -2232,7 +2221,7 @@ app.post('/api/notify', async (req, res) => {
       body: x.body,
       sound: 'default',
       priority: 'high',
-      channelId: type === 'call' ? 'calls_ring' : type === 'message' ? 'messages' : 'activity',
+      channelId: type === 'call' ? 'calls_ring_v2' : type === 'message' ? 'messages' : 'activity',
       data: { type, ref: x.ref },
       // Calls: "Answer" / "Decline" buttons, and the alert is dropped after 60 seconds
       ...(type === 'call' ? { categoryId: 'call', ttl: 60 } : {}),
@@ -2479,44 +2468,15 @@ app.get('/download', async (req, res) => {
     if (pick && pick.value && /^https:\/\//.test(pick.value.url || '')) { url = pick.value.url; version = pick.value.version || ''; }
   } catch { }
   const safe = s => String(s).replace(/[<>"']/g, '');
-  // Black page with the CX mark (it draws itself), same look as the app
-  res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#000000"><title>Download CIVIX</title>
-<meta property="og:title" content="CIVIX"><meta property="og:description" content="Your people, your interests, your world. Free, no ads.">
-<style>
-*{box-sizing:border-box}html,body{margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
-body{min-height:100vh;display:flex;align-items:center;justify-content:center}
-.c{width:100%;max-width:420px;padding:40px 24px;text-align:center}
-.mark{width:112px;height:112px;margin:0 auto 22px;display:block}
-.mark path{fill:none;stroke:#fff}
-.arc{stroke-width:12.5;stroke-dasharray:150;stroke-dashoffset:150;animation:draw .9s .15s cubic-bezier(.6,0,.2,1) forwards}
-.x1,.x2{stroke-width:10;stroke-linecap:square;stroke-dasharray:32;stroke-dashoffset:32}
-.x1{animation:draw .35s .95s ease-out forwards}.x2{animation:draw .35s 1.15s ease-out forwards}
-@keyframes draw{to{stroke-dashoffset:0}}
-.word{font-weight:300;letter-spacing:12px;font-size:30px;margin-left:12px;opacity:0;animation:up .6s 1.4s ease-out forwards}
-.word b{color:#FF2D78;font-weight:700}
-.tag{color:#8B8B93;font-size:14px;margin:10px 0 0;opacity:0;animation:up .6s 1.6s ease-out forwards}
-@keyframes up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-.rest{opacity:0;animation:up .6s 1.8s ease-out forwards}
-a.btn{display:block;margin:34px 0 10px;padding:18px;border-radius:16px;background:#fff;color:#000;text-decoration:none;font-weight:800;font-size:18px}
-a.btn:active{transform:scale(.98)}
-.v{color:#8B8B93;font-size:12px}
-ol{list-style:none;counter-reset:s;text-align:left;margin:28px 0 0;padding:0;border-top:1px solid #1A1A1C}
-li{counter-increment:s;display:flex;gap:14px;padding:14px 2px;border-bottom:1px solid #1A1A1C;color:#D8D8DE;font-size:15px;line-height:1.45}
-li:before{content:counter(s);flex:0 0 26px;height:26px;border-radius:13px;border:1px solid #3A3A3E;color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center}
-li b{color:#fff}.m{color:#6E6E76;font-size:12px;margin-top:22px;line-height:1.5}
-@media (prefers-reduced-motion:reduce){*{animation:none!important;opacity:1!important;stroke-dashoffset:0!important}}
-</style></head>
-<body><div class="c">
-<svg class="mark" viewBox="0 0 128 120" aria-label="CIVIX"><g transform="translate(4 0)">
-<path class="arc" d="M79.6 38.4 A30 30 0 1 0 79.6 81.6"/><path class="x1" d="M61 49 L83 71"/><path class="x2" d="M83 49 L61 71"/></g></svg>
-<div class="word">CIVIX<b>.</b></div>
-<p class="tag">Your people, your interests, your world.</p>
-<div class="rest">
-${url ? `<a class="btn" href="${safe(url)}">Download for Android</a><div class="v">${version ? 'Version ' + safe(version) + ' · ' : ''}Free · No ads</div>
-<ol><li><span>Tap <b>Download for Android</b>.</span></li><li><span>Open the downloaded file (tap the notification, or Files → Downloads).</span></li><li><span>If the phone asks, allow <b>Install unknown apps</b> – only this once.</span></li><li><span>Tap <b>Install</b>, then <b>Open</b>.</span></li></ol>
-<p class="m">After this, new features arrive inside CIVIX by themselves.<br>CIVIX never asks for money or bank details.</p>` : `<p class="m">The download link is not ready yet. Please try again later.</p>`}
-</div>
+  res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Download CIVIX</title>
+<style>body{margin:0;font-family:system-ui,sans-serif;background:linear-gradient(165deg,#3B1766,#120A1C 40%,#07060B);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.c{max-width:420px;padding:28px;text-align:center}.logo{font-weight:900;letter-spacing:10px;font-size:34px}.logo b{color:#FF2D78}
+a.btn{display:block;margin:26px 0 18px;padding:18px;border-radius:20px;color:#fff;text-decoration:none;font-weight:900;font-size:20px;background:linear-gradient(90deg,#FF8A00,#FF2D78,#7B2FF7)}
+ol{text-align:left;color:#ddd;line-height:1.7;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:16px 16px 16px 34px}.m{color:#9a95ab;font-size:13px}</style></head>
+<body><div class="c"><div class="logo">CIVIX<b>.</b></div><p class="m">Your people, your interests, your world.</p>
+${url ? `<a class="btn" href="${safe(url)}">⬇ Download CIVIX${version ? ' ' + safe(version) : ''}</a>
+<ol><li>Tap the button above. The app file downloads.</li><li>Open the downloaded file (tap the notification, or Files → Downloads).</li><li>If the phone asks, allow <b>"Install unknown apps"</b> for Chrome / Files.</li><li>Tap <b>Install</b>, then <b>Open</b>.</li><li>Inside CIVIX, new features arrive by themselves – no need to download again.</li></ol>
+<p class="m">Android phones only. CIVIX is free, has no ads and never asks for money.</p>` : `<p>The download link is not set yet.</p>`}
 </div></body></html>`);
 });
 
@@ -2646,6 +2606,77 @@ async function youtubeSearch(q, shortsOnly) {
   walk(data);
   return rssToReels(out.map(x => ({ ...x, publishedAt: new Date().toISOString() })), { language: 'any', country: 'World', category: 'Entertainment', kind: 'creator' });
 }
+
+// ---------- DISCOVER: fresh photos for the Home feed ----------
+// Uses the keys you already have on Render: PEXELS_API_KEY, UNSPLASH_ACCESS_KEY, PIXABAY_API_KEY.
+// NASA picture of the day works with no key (NASA_API_KEY is optional and gives a higher limit).
+const NASA_API_KEY = process.env.NASA_API_KEY || 'DEMO_KEY';
+const DISCOVER_QUERY = {
+  World: 'world travel city', Politics: 'city skyline', Business: 'office workspace', Technology: 'technology gadgets',
+  Gaming: 'gaming setup', Sports: 'sports action', Science: 'science laboratory', Entertainment: 'concert stage lights',
+  Movies: 'cinema', Music: 'musician', Travel: 'travel landscape', Food: 'delicious food', Fashion: 'fashion style',
+  Art: 'art painting', Photography: 'street photography', Nature: 'nature landscape', Education: 'books study',
+};
+const DISCOVER_EXTRA = ['mountains', 'ocean sunset', 'architecture', 'wildlife', 'space galaxy', 'coffee', 'flowers', 'vintage cars', 'street food', 'northern lights'];
+const dRand = n => Math.floor(Math.random() * n);
+const dShuffle = a => { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = dRand(i + 1); [b[i], b[j]] = [b[j], b[i]]; } return b; };
+
+async function discoverPexels(q, topic) {
+  const page = 1 + dRand(8);
+  const data = await cached(`dpx:${q}:${page}`, 30 * 60 * 1000, async () => {
+    const r = await fetch(`https://api.pexels.com/v1/search?query=${encodeURIComponent(q)}&per_page=14&page=${page}`, { headers: { Authorization: PEXELS_API_KEY } });
+    if (!r.ok) throw new Error(`Pexels ${r.status}`);
+    return r.json();
+  });
+  return (data.photos || []).map(p => ({ id: `px-${p.id}`, imageUrl: p.src?.large || p.src?.medium, w: p.width, h: p.height, title: p.alt || q, credit: p.photographer, source: 'Pexels', link: p.url, topic }));
+}
+async function discoverUnsplash(q, topic) {
+  const page = 1 + dRand(8);
+  const data = await cached(`dun:${q}:${page}`, 30 * 60 * 1000, async () => {
+    const r = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(q)}&per_page=14&page=${page}&content_filter=high`, { headers: { Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}`, 'Accept-Version': 'v1' } });
+    if (!r.ok) throw new Error(`Unsplash ${r.status}`);
+    return r.json();
+  });
+  return (data.results || []).map(p => ({ id: `un-${p.id}`, imageUrl: p.urls?.regular, w: p.width, h: p.height, title: p.description || p.alt_description || q, credit: p.user?.name, source: 'Unsplash', link: p.links?.html, topic }));
+}
+async function discoverPixabay(q, topic) {
+  const page = 1 + dRand(6);
+  const data = await cached(`dpb:${q}:${page}`, 30 * 60 * 1000, async () => {
+    const r = await fetch(`https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${encodeURIComponent(q)}&image_type=photo&safesearch=true&per_page=16&page=${page}`);
+    if (!r.ok) throw new Error(`Pixabay ${r.status}`);
+    return r.json();
+  });
+  return (data.hits || []).map(p => ({ id: `pb-${p.id}`, imageUrl: p.largeImageURL || p.webformatURL, w: p.imageWidth, h: p.imageHeight, title: (p.tags || q).split(',').slice(0, 3).join(' · '), credit: p.user, source: 'Pixabay', link: p.pageURL, topic }));
+}
+async function discoverNasa() {
+  const data = await cached(`dnasa:${Math.floor(Date.now() / (20 * 60 * 1000))}`, 20 * 60 * 1000, async () => {
+    const r = await fetch(`https://api.nasa.gov/planetary/apod?api_key=${NASA_API_KEY}&count=3`);
+    if (!r.ok) throw new Error(`NASA ${r.status}`);
+    return r.json();
+  });
+  return (Array.isArray(data) ? data : []).filter(x => x.media_type === 'image' && (x.url || x.hdurl)).map(x => ({ id: `nasa-${x.date}-${(x.title || '').length}`, imageUrl: x.url || x.hdurl, w: 4, h: 3, title: x.title, credit: x.copyright ? String(x.copyright).replace(/\s+/g, ' ').trim() : 'NASA', source: 'NASA', link: `https://apod.nasa.gov/apod/ap${String(x.date || '').slice(2).replace(/-/g, '')}.html`, topic: 'Science' }));
+}
+app.get('/api/discover', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const asked = String(req.query.topics || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 6);
+    const picks = dShuffle(asked.filter(t => DISCOVER_QUERY[t])).slice(0, 3).map(t => [DISCOVER_QUERY[t], t]);
+    picks.push([DISCOVER_EXTRA[dRand(DISCOVER_EXTRA.length)], 'Nature'], [DISCOVER_EXTRA[dRand(DISCOVER_EXTRA.length)], 'Photography']);
+    const providers = [];
+    if (PEXELS_API_KEY) providers.push(discoverPexels);
+    if (UNSPLASH_ACCESS_KEY) providers.push(discoverUnsplash);
+    if (PIXABAY_API_KEY) providers.push(discoverPixabay);
+    const jobs = providers.length ? picks.slice(0, 5).map(([q, t], i) => providers[(i + dRand(providers.length)) % providers.length](q, t).catch(() => [])) : [];
+    if (Math.random() < 0.5) jobs.push(discoverNasa().catch(() => []));
+    const lists = await Promise.all(jobs);
+    const seen = new Set();
+    const items = dShuffle(lists.flat()).filter(x => x && x.imageUrl && !seen.has(x.id) && seen.add(x.id));
+    const n = Math.max(4, Math.min(24, Number(req.query.n) || 12));
+    res.json({ items: items.slice(0, n), sources: providers.length + 1 });
+  } catch (e) {
+    res.json({ items: [], error: String(e.message || e) });
+  }
+});
 
 app.get('/api/video-search', async (req, res) => {
   const q = cleanQ(req.query.q);
@@ -3316,40 +3347,6 @@ a{display:inline-block;margin-top:18px;background:#FF2D78;color:#fff;text-decora
 <body><div class="c"><div class="l">C</div><h2>@${name}</h2><p>is on CIVIX – reels, news, chats and calls in one app.</p>
 <a href="civix://u/${name}">Open in CIVIX</a><p style="margin-top:22px;font-size:13px">Don't have CIVIX yet? Ask @${name} to send you the app.</p></div>
 <script>setTimeout(function(){location.href='civix://u/${name}'},300)</script></body></html>`);
-});
-
-// ---------- 🔐 Leaked-password check (k-anonymity) ----------
-// The app sends only the FIRST 5 letters of the password's SHA-1 hash – never the password.
-// We ask Have I Been Pwned for all leaked hashes starting with those 5 letters and return them;
-// the phone checks the rest itself. Nobody (not CIVIX, not HIBP) ever learns the password.
-app.get('/api/pwned/:prefix', async (req, res) => {
-  const prefix = String(req.params.prefix || '').toUpperCase();
-  if (!/^[0-9A-F]{5}$/.test(prefix)) return res.status(400).json({ error: 'bad prefix' });
-  try {
-    const r = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`, { headers: { 'Add-Padding': 'true', 'User-Agent': 'CIVIX' } });
-    if (!r.ok) return res.status(502).json({ error: 'unavailable' });
-    res.set('Cache-Control', 'no-store').type('text/plain').send(await r.text());
-  } catch {
-    res.status(502).json({ error: 'unavailable' });
-  }
-});
-
-// ---------- Invite links (part27.sql): /i/<code> opens CIVIX, or shows how to get it ----------
-app.get('/i/:code', (req, res) => {
-  const code = String(req.params.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
-  res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>You're invited to CIVIX</title>
-<meta property="og:title" content="You're invited to CIVIX 💛"><meta property="og:description" content="The private app for your family and close friends.">
-<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#07060B;color:#fff;font-family:-apple-system,Segoe UI,Roboto,sans-serif;text-align:center}
-.c{padding:28px;max-width:420px}.l{width:84px;height:84px;border-radius:24px;margin:0 auto 18px;background:linear-gradient(45deg,#FF8A00,#FF2D78 55%,#7B2FF7);display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:900}
-a{display:block;margin-top:14px;background:#FF2D78;color:#fff;text-decoration:none;font-weight:800;padding:15px 26px;border-radius:14px}a.s{background:#1C1A26}
-p{color:#aaa;line-height:1.5}.code{font-size:26px;letter-spacing:4px;font-weight:900;background:#16151F;border-radius:14px;padding:14px;margin:18px 0}</style></head>
-<body><div class="c"><div class="l">C</div><h2>You're invited to CIVIX 💛</h2><p>The private place for your family and close friends: posts, stories, chats and calls.</p>
-<div class="code">${code}</div>
-<a href="civix://invite/${code}">I have CIVIX – open it</a>
-<a class="s" href="/download">Get CIVIX (Android)</a>
-<p style="margin-top:20px;font-size:13px">After installing, sign up, then open this link again – or type the code in CIVIX: Profile → Settings → "I have an invite code".</p></div>
-<script>setTimeout(function(){location.href='civix://invite/${code}'},400)</script></body></html>`);
 });
 
 // ---------- Scheduled chat messages: send the ones whose time has come (every minute) ----------
